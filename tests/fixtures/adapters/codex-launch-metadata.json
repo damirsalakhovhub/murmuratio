@@ -1,0 +1,11 @@
+{
+  "exec": {"source": "exec", "originator": "codex_exec"},
+  "exec_originator": {"originator": "codex_exec"},
+  "desktop": {"source": "vscode", "originator": "Codex Desktop"},
+  "cli": {"source": "cli", "originator": "codex_cli_rs"},
+  "desktop_originator": {"originator": "Codex Desktop"},
+  "subagent": {
+    "source": {"subagent": {"thread_spawn": {"parent_thread_id": "parent-thread", "depth": 1}}},
+    "originator": "Codex Desktop"
+  }
+}

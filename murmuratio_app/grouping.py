@@ -79,6 +79,13 @@ def inherit_starter_folders(agents, aliases):
         folder(agent, set())
 
 
+def mark_codex_worker(agent):
+    """A linked chat's completed turn is a worker completion, not an idle chat."""
+    if agent.get('codex_role') == 'chat' and agent['status'] == 'waiting' and agent.get('waiting_since') is not None:
+        agent.update(status='done', completed=True, ended=agent.pop('waiting_since'))
+    agent['codex_role'] = 'worker'
+
+
 def merge_codex_sources(wrappers, rollouts):
     """Unify observations only when a recorded thread or run identifier agrees."""
     groups = []
@@ -107,6 +114,8 @@ def merge_codex_sources(wrappers, rollouts):
             continue
         agent = dict(max(wrapped, key=lambda item: (item.get('started') or 0, item.get('last_at') or 0)))
         if native:
+            native = dict(native)
+            mark_codex_worker(native)
             # The wrapper can exit while its worker still owns the rollout.
             if agent.get('_dead_expired') and not native.get('completed'):
                 agent['completed'], agent['ended'] = False, None
@@ -127,6 +136,7 @@ def merge_codex_sources(wrappers, rollouts):
                 for key in ('status', 'completed', 'ended', 'last_at', 'current_action', 'waiting_since'):
                     agent[key] = native.get(key)
             agent['seconds'] = native['seconds'] if agent['status'] == 'working' else native['_stopped_seconds']
+        agent['codex_role'] = 'worker'
         result.append(agent)
     return result
 
@@ -174,6 +184,8 @@ def link_codex(agents, aliases, launches):
         agent['parent_id'], agent['link'] = parent['id'], 'inferred'
     for agent in codex:
         agent['orchestrator'] = False
+        if agent.get('parent_id'):
+            mark_codex_worker(agent)
         parent = next((parent for parent in aliases.values() if parent['id'] == agent.get('parent_id')), None)
         if parent:
             agent['project'] = parent['project']

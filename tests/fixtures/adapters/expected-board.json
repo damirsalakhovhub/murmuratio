@@ -26,6 +26,7 @@
       "ended": null,
       "verdict": "",
       "head": "",
+      "codex_role": "worker",
       "parent_id": null,
       "orchestrator": false
     },
@@ -170,6 +171,10 @@
       "start": 1995200.0,
       "hours": []
     }
+  },
+  "codex_chats": {
+    "hidden": 0,
+    "running": 0
   },
   "credits": {
     "balance": 80.0,

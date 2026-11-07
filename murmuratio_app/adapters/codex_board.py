@@ -18,6 +18,14 @@ USER_ROLE = re.compile(rb'"role"\s*:\s*"user"')
 RECORD_TIMESTAMP = re.compile(rb'"timestamp"\s*:\s*("[^"\\]*(?:\\.[^"\\]*)*"|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)')
 
 
+def interactive_session(data):
+    """Use launch metadata, never task text, to recognize a person's chat."""
+    source, originator = data.get('source'), data.get('originator')
+    if source == 'exec' or originator == 'codex_exec' or isinstance(source, dict) and 'subagent' in source:
+        return False
+    return source in ('cli', 'tui', 'vscode') or originator in ('Codex Desktop', 'codex_cli_rs', 'codex-tui')
+
+
 def rollout_writers(paths):
     """Find open writers in one bounded macOS query; failure is not proof of death."""
     names = {str(path.resolve()): path for path in paths}
@@ -256,9 +264,9 @@ class CodexBoardAdapter(Adapter):
                 cwd = data.get('cwd', '')
                 started = data.get('started') or data.get('turn_started') or modified
                 state = data.get('turn_state')
-                exec_session = data.get('source') == 'exec' or data.get('originator') == 'codex_exec'
+                chat = interactive_session(data) and not (data.get('parent_session') or data.get('parent_app_session'))
                 status = ('hung' if state == 'working' and now - modified > 600 else state or 'waiting')
-                if status == 'done' and not exec_session:
+                if status == 'done' and chat:
                     status = 'waiting'
                 end = data.get('ended') if status in ('done', 'blocked') else None
                 observation = self.observation(dict(
@@ -277,7 +285,7 @@ class CodexBoardAdapter(Adapter):
                     context_window=data.get('context_window'),
                     parent_session=data.get('parent_session', ''),
                     parent_app_session=data.get('parent_app_session', ''),
-                    board_source='codex_rollout', _rollout=True,
+                    board_source='codex_rollout', codex_role='chat' if chat else 'worker', _rollout=True,
                     _run_id=data.get('run_id', ''), _turns=list(data.get('turns', []))),
                     data.get('last_at') or modified, 'inferred')
                 agent = observation.value

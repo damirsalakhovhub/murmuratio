@@ -11,7 +11,7 @@ from murmuratio_app.metrics.quota import quota_routing, week_forecast
 from murmuratio_app.metrics.usage import burn_by_model as calculate_burn, claude_usage_totals, credit_totals
 from murmuratio_app.adapters.claude import ClaudeDesktopAdapter, ClaudeSessionsAdapter
 from murmuratio_app.adapters.wrapper import CodexWrapperAdapter
-from murmuratio_app.adapters.codex_board import CodexBoardAdapter
+from murmuratio_app.adapters.codex_board import CodexBoardAdapter, HISTORY_SECONDS
 from murmuratio_app.adapters.usage import ClaudeUsageAdapter, CodexMeterAdapter
 from murmuratio_app.adapters.quota_sources import ClaudeLimitsAdapter, CodexLimitsAdapter
 from murmuratio_app.discovery import Discovery
@@ -211,8 +211,12 @@ class NowSource:
             for path in set(self.cache) - seen:
                 del self.cache[path]
             linked = self.link_parents(agents + completed, desktop)
+            hidden_chats = [a for a in linked if a.get('codex_role') == 'chat' and not self.config.show_codex_chats]
+            hidden_running = sum(not a.get('completed') and a['status'] in ('working', 'hung') for a in hidden_chats)
+            linked = [a for a in linked if a.get('codex_role') != 'chat' or self.config.show_codex_chats]
             agents = retain_agents([a for a in linked if not a.get('completed')], now)
-            completed = [a for a in linked if a.get('completed')]
+            completed = [a for a in linked if a.get('completed') and (a['kind'] != 'codex'
+                         or now - (a.get('ended') or a.get('last_at') or 0) < HISTORY_SECONDS)]
             agents.sort(key=lambda a: (a['status'] != 'working', -(a['last_at'] or 0)))
             completed.sort(key=lambda a: -(a['ended'] or 0))
             limits = {'codex': self._isolate('codex_limits', [], self.codex_limits),
@@ -249,7 +253,8 @@ class NowSource:
                         worker_share, self.claude_models = snapshot['value']
                         if include_split:
                             claude_week['worker_share'] = worker_share
-            state = {'agents': agents, 'completed': completed, 'now': now, 'limits': limits, 'build': web_build()}
+            state = {'agents': agents, 'completed': completed, 'now': now, 'limits': limits, 'build': web_build(),
+                     'codex_chats': {'hidden': len(hidden_chats), 'running': hidden_running}}
             if modules['routing']:
                 state['routing'] = routing
             if modules['forecast']:

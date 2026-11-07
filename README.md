@@ -25,7 +25,7 @@ Keep the cloned folder while installed. If `~/.claude` exists, the installer bac
 Reads by default:
 
 - Claude Code transcripts and subagent records: `~/.claude/projects/`. Claude desktop session metadata: `~/Library/Application Support/Claude/claude-code-sessions/`.
-- Saved Codex sessions and usage-limit events: `~/.codex/sessions/`. Interactive and `exec` sessions appear without a wrapper or optional module. `CODEX_HOME` selects the Codex data directory.
+- Saved Codex sessions and usage-limit events: `~/.codex/sessions/`. Exec workers, Codex subagents and Claude-linked workers appear without a wrapper or optional module. Interactive app and CLI chats are hidden from projects by default; running chats appear as `Your Codex chats: N` in the header. `CODEX_HOME` selects the Codex data directory.
 - Local open-file information from macOS `lsof`, to check whether an inactive Codex rollout still has a writer.
 - Claude limits caches: `~/.local/share/murmuratio/claude-limits.json` and legacy `~/.claude/tools/claude-limits.json`. The newest usable snapshot is selected.
 - With `codex_wrapper`: compatible run records in `~/.claude/tools/codex-runs/` and the event files they reference. Murmuratio does not create wrapper records.
@@ -48,6 +48,7 @@ Sends: nothing during normal use. The HTTP server listens only on `127.0.0.1` an
 ## Accuracy limits
 
 - Codex discovery covers saved sessions modified in the last 24 hours. Ephemeral sessions without saved rollouts are invisible.
+- Launch classification uses `session_meta.source` (`exec` or a `subagent` object for workers; `cli`, `tui` or `vscode` for interactive chats), with `originator` as a fallback. A Claude parent link or wrapper record identifies a worker regardless of the interactive launch metadata. Finished cards leave the board after 30 minutes; their recent history still contributes to today's totals.
 - Claude-to-Codex parent links use recorded identifiers when available. Otherwise, a unique working-directory and launch-time match within about two minutes is marked inferred and may be wrong. Indirect or delayed launches may be missed.
 - Very large records may be read partially or skipped. Codex board reads skip most individual records larger than 512 KiB; oversized metadata and turn boundaries receive limited handling.
 - Status and context are inferred from saved data. Usage-limit numbers are snapshots and may be stale.
@@ -62,6 +63,15 @@ All modules are off by default. Set them to `true` under `[modules]` in `~/.conf
 - `routing`: suggests a tool; `codex_credits` shows credit usage; `burn_rate` shows token usage rates.
 - `codex_chats`: shows saved chats; `context_reset` enables experimental resets and requires `codex_chats`.
 - `codex_wrapper`: reads wrapper records; `branding` adds board graphics.
+
+To show interactive Codex chats as full board cards, add this separate section and restart:
+
+```toml
+[board]
+show_codex_chats = true
+```
+
+This setting is independent of the `codex_chats` module, which enables the saved-chat browser tab.
 
 ## Uninstall
 

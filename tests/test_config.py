@@ -30,6 +30,7 @@ class ConfigTests(unittest.TestCase):
         config = Config.load(self.home, self.path)
         self.assertEqual(config.modules, {name: False for name in MODULES})
         self.assertEqual(config.project_order, [])
+        self.assertFalse(config.show_codex_chats)
         source = NowSource(self.home, config=config)
         self.assertEqual(source.project('/work/project-a'), 'project-a')
         self.assertEqual(source.project('/work/northstar'), 'northstar')
@@ -79,7 +80,8 @@ after_inherit = true
 
     def test_invalid_values_fail_instead_of_silently_enabling_modules(self):
         for value in ('[modules]\nrouting = "yes"\n', '[work_hours]\nstart = 21\nend = 9\n',
-                      '[projects]\norder = "project"\n'):
+                      '[projects]\norder = "project"\n', '[board]\nshow_codex_chats = "yes"\n',
+                      'board = true\n'):
             self.path.write_text(value)
             with self.subTest(value=value), self.assertRaises(ValueError):
                 Config.load(self.home, self.path)

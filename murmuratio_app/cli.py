@@ -25,7 +25,8 @@ ROOT = Path(__file__).resolve().parent.parent
 LABEL = 'org.murmuratio.app'
 LEGACY_LABEL = 'org.agent-inspector.app'
 DEFAULT_CONFIG = ('# Optional modules are disabled by default.\n[modules]\n' +
-                  ''.join(f'{name} = false\n' for name in MODULES)).encode()
+                  ''.join(f'{name} = false\n' for name in MODULES) +
+                  '\n[board]\nshow_codex_chats = false\n').encode()
 
 
 class InstallError(Exception):

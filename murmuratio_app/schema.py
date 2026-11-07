@@ -52,6 +52,7 @@ class Session(Parent, Action, SessionTimes, Context, total=False):
     completed: bool
     app_session: str | None
     thread: str | None
+    codex_role: Literal['worker', 'chat']
 
 
 class DesktopSession(TypedDict, total=False):

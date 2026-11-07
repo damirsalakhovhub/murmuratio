@@ -37,13 +37,13 @@ class CodexBoardTests(unittest.TestCase):
     def event(self, kind, at, **payload):
         return {'type': 'event_msg', 'timestamp': at, 'payload': {'type': kind, **payload}}
 
-    def rollout(self, thread, *, source='exec', cwd=None, started=None, finished=False, run_id=None):
+    def rollout(self, thread, *, source='exec', cwd=None, started=None, finished=False, run_id=None, metadata=None):
         started = started if started is not None else self.now - 58
         cwd = cwd or self.cwd
         path = self.home / '.codex/sessions/2026/11/07' / f'rollout-test-{thread}.jsonl'
         records = [
             {'type': 'session_meta', 'timestamp': started, 'payload': {
-                'id': thread, 'timestamp': started, 'cwd': cwd, 'source': source, 'run_id': run_id}},
+                'id': thread, 'timestamp': started, 'cwd': cwd, 'source': source, 'run_id': run_id, **(metadata or {})}},
             self.event('task_started', started + 1, model_context_window=200000),
             {'type': 'turn_context', 'timestamp': started + 1, 'payload': {'model': 'gpt-6.1-sol', 'cwd': cwd}},
             {'type': 'response_item', 'timestamp': started + 2, 'payload': {'type': 'message', 'role': 'user',
@@ -82,14 +82,75 @@ class CodexBoardTests(unittest.TestCase):
         self.rollout('running')
         self.source.codex = CodexSource(self.home / '.codex', lambda value: value)
         agents = self.agents()
-        self.assertEqual(set(agents), {'codex:interactive', 'codex:finished', 'codex:running'})
-        self.assertEqual(agents['codex:interactive']['status'], 'waiting')
+        self.assertEqual(set(agents), {'codex:finished', 'codex:running'})
+        self.assertEqual(self.source.state()['codex_chats'], {'hidden': 1, 'running': 0})
         self.assertEqual(agents['codex:finished']['status'], 'done')
         running = agents['codex:running']
         self.assertEqual((running['model'], running['task'], running['cwd']), ('gpt-6.1-sol', 'Build the board', self.cwd))
         self.assertEqual((running['context_used'], running['context_window']), (42000, 200000))
         self.assertIsNone(running['parent_id'])
         self.assertFalse((self.home / '.claude').exists())
+
+    def launch_metadata(self, name):
+        path = Path(__file__).parent / 'fixtures/adapters/codex-launch-metadata.json'
+        return json.loads(path.read_text())[name]
+
+    def test_launch_metadata_separates_workers_and_running_chats_without_claude(self):
+        for name in ('exec', 'exec_originator', 'desktop', 'cli', 'desktop_originator', 'subagent'):
+            self.rollout(name, source=None, metadata=self.launch_metadata(name))
+        self.rollout('waiting-chat', finished=True, metadata=self.launch_metadata('desktop'))
+        state = self.source.state()
+        self.assertEqual({a['id'] for a in state['agents']}, {'codex:exec', 'codex:exec_originator', 'codex:subagent'})
+        self.assertEqual(state['codex_chats'], {'hidden': 4, 'running': 3})
+        self.assertTrue(all(a['codex_role'] == 'worker' for a in state['agents']))
+        self.assertFalse((self.home / '.claude').exists())
+
+    def test_board_option_shows_interactive_cards_without_saved_chat_module(self):
+        self.rollout('chat', metadata=self.launch_metadata('desktop'))
+        self.assertEqual(self.source.state()['agents'], [])
+        path = self.home / '.config/murmuratio/config.toml'
+        path.parent.mkdir(parents=True)
+        path.write_text('[board]\nshow_codex_chats = true\n')
+        self.source.config = Config.load(self.home)
+        state = self.source.state()
+        self.assertEqual([a['id'] for a in state['agents']], ['codex:chat'])
+        self.assertEqual(state['agents'][0]['codex_role'], 'chat')
+        self.assertEqual(state['codex_chats'], {'hidden': 0, 'running': 0})
+        self.assertFalse(self.source.config.modules['codex_chats'])
+
+    def test_interactive_metadata_with_claude_link_is_a_worker(self):
+        self.claude(command='codex exec task', output='thread_id: linked')
+        self.rollout('linked', metadata=self.launch_metadata('desktop'))
+        agent = self.agents()['codex:linked']
+        self.assertEqual((agent['parent_id'], agent['codex_role']), ('claude:parent', 'worker'))
+        self.assertEqual(self.source.state()['codex_chats'], {'hidden': 0, 'running': 0})
+        self.write(self.home / '.codex/sessions/2026/11/07/rollout-test-linked.jsonl',
+                   [self.event('task_complete', self.now - 1)])
+        agent = self.agents()['codex:linked']
+        self.assertEqual((agent['status'], agent['completed'], agent['ended']), ('done', True, self.now - 1))
+
+    def test_recorded_parent_or_wrapper_identifies_worker_even_without_claude(self):
+        self.rollout('parent-meta', finished=True, metadata={**self.launch_metadata('desktop'), 'parent_session': 'absent'})
+        self.rollout('wrapped', metadata=self.launch_metadata('desktop'))
+        self.source.config.modules['codex_wrapper'] = True
+        path = self.home / '.claude/tools/codex-runs/run.json'
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({'status': 'running', 'thread': 'wrapped', 'cwd': self.cwd,
+                                    'started': self.now - 60, 'pid': 7}))
+        agents = self.agents()
+        self.assertEqual(set(agents), {'codex:parent-meta', 'codex:run'})
+        self.assertTrue(all(a['codex_role'] == 'worker' for a in agents.values()))
+        self.assertEqual(agents['codex:parent-meta']['status'], 'done')
+
+    def test_finished_subagent_uses_worker_completion(self):
+        self.rollout('child', finished=True, metadata=self.launch_metadata('subagent'))
+        self.assertEqual(self.agents()['codex:child']['status'], 'done')
+
+    def test_finished_rollout_expires_by_end_time_even_with_recent_mtime(self):
+        self.rollout('finished', finished=True, started=self.now - 86400)
+        self.assertIn('codex:finished', self.agents())
+        self.now += 4
+        self.assertNotIn('codex:finished', self.agents())
 
     def test_claude_only_and_neither_are_read_only(self):
         self.assertEqual(self.agents(), {})
@@ -155,6 +216,7 @@ class CodexBoardTests(unittest.TestCase):
         self.assertEqual(agent['task'], 'Build the board')
 
     def test_partial_append_retries_and_truncation_resets(self):
+        self.source.config.show_codex_chats = True
         path = self.rollout('partial', finished=True)
         partial = json.dumps(self.event('task_started', self.now - 10))
         with path.open('a') as stream:
@@ -321,6 +383,7 @@ class CodexBoardTests(unittest.TestCase):
         self.assertEqual((agent['id'], agent['status'], agent['ended']), ('codex:run', 'done', ended))
 
     def test_inactive_codex_without_writer_moves_to_completed_after_30_minutes(self):
+        self.source.config.show_codex_chats = True
         for source, finished in [('exec', False), ('vscode', False), ('vscode', True)]:
             with self.subTest(source=source, finished=finished):
                 path = self.rollout('stale', source=source, started=self.now - 1900, finished=finished)

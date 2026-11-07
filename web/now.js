@@ -589,7 +589,7 @@ window.createNowView = ({node, text}) => {
     const byId = new Map(agents.map(agent => [agent.id, agent]));
     const finished = agent => agent.completed || ['done', 'crashed'].includes(agent.status)
       || (!agent.orchestrator && agent.status === 'blocked' && !needsYou(agent));
-    const keep = new Set(agents.filter(agent => agent.board_source === 'codex_rollout' || !finished(agent)
+    const keep = new Set(agents.filter(agent => !finished(agent)
       || now - (agent.ended ?? agent.last_at ?? 0) < 1800).map(agent => agent.id));
     const pending = [...keep];
     while (pending.length) {
@@ -731,9 +731,9 @@ window.createNowView = ({node, text}) => {
       loadedBuild = data.build;
     }
     // Existing cards keep their order; newly seen cards append after their parent.
-    // Saved Codex sessions remain for the recent history window; other finished work leaves after 30 min.
+    // Finished work leaves after 30 min, with ancestors kept while children are active.
     const everyone = [...(data.agents || []), ...(data.completed || [])];
-    empty.hidden = everyone.length > 0;
+    empty.hidden = everyone.length > 0 || data.codex_chats?.hidden > 0;
     const incoming = retainedCards(everyone, data.now);
     // A same-title successor takes its predecessor's place, above existing workers.
     for (const agent of incoming.values()) {
@@ -809,6 +809,9 @@ window.createNowView = ({node, text}) => {
     for (const [value, label] of [[total.running, ' running'], [total.needs, ' needs attention'], [total.done, ' done today']]) {
       const item = node('span', 'now-summary-item');
       item.append(node('b', '', String(value)), label); summary.append(item);
+    }
+    if (data.codex_chats?.running > 0) {
+      summary.append(node('span', 'now-summary-item', `Your Codex chats: ${data.codex_chats.running}`));
     }
     for (const [project, group] of groups) {
       const c = counts(everyone.filter(a => a.project === project));

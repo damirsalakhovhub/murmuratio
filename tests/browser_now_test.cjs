@@ -40,7 +40,7 @@ const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import
     const atlas = item('atlas', 'Atlas', {orchestrator: true, status: 'waiting', waiting_since: at(18, 31), task: 'Review implementation'});
     const gameplay = item('gameplay', 'Atlas', {kind: 'codex', model: 'gpt-6.1-terra', folder: 'gameplay', parent_id: 'atlas',
       started: at(8, 34), seconds: 360, task: 'Update the dashboard component', current_action: 'editing dashboard.py',
-      thread: 'fixture-thread', link: 'inferred', context_tokens: 987654, context_used: 49, context_window: 100});
+      thread: 'fixture-thread', board_source: 'codex_rollout', link: 'inferred', context_tokens: 987654, context_used: 49, context_window: 100});
     const icons = item('icons', 'Atlas', {parent_id: 'atlas', folder: 'interfaces', status: 'done', task: 'Review the layout',
       started: at(17, 51), ended: at(18, 18), seconds: 27 * 60});
     const northstar = item('northstar', 'Northstar', {orchestrator: true, status: 'idle', last_at: at(18, 9), task: 'Prepare reference materials'});
@@ -353,12 +353,30 @@ const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import
       await page.screenshot({path: path.join(artifacts, `empty-${width}.png`), fullPage: true});
     }
     const standalone = item('standalone', 'Codex project', {kind: 'codex', model: 'gpt-6.1-sol',
-      status: 'done', completed: true, ended: now - 7200, board_source: 'codex_rollout'});
+      status: 'done', completed: true, ended: now - 1799, board_source: 'codex_rollout'});
     payload = {now, agents: [], completed: [standalone]};
     await page.waitForSelector('[data-agent-id="standalone"]');
     assert.equal(await page.$eval('.now-empty', e => e.hidden), true);
     assert.equal(await page.$eval('[data-agent-id="standalone"]', e => e.hasAttribute('title')), false);
     await page.screenshot({path: path.join(artifacts, 'codex-only.png'), fullPage: true});
+    payload = {...payload, now: now + 1};
+    await page.waitForFunction(() => !document.querySelector('[data-agent-id="standalone"]'));
+    assert.match(await page.$eval('#now-summary', e => e.textContent), /1 done today/);
+    // A Codex-app-only user sees one quiet count, with no project or false empty-state copy.
+    payload = {now, agents: [], completed: [], codex_chats: {hidden: 3, running: 2}};
+    await page.waitForFunction(() => document.querySelector('#now-summary').textContent.includes('Your Codex chats: 2'));
+    assert.equal(await page.$$eval('.now-project', es => es.length), 0);
+    assert.equal(await page.$eval('.now-empty', e => e.hidden), true);
+    for (const theme of ['light', 'dark']) {
+      await page.emulateMediaFeatures([{name: 'prefers-color-scheme', value: theme}]);
+      for (const [width, dpr] of [[1280, 1], [375, 2]]) {
+        await page.setViewport({width, height: 1000, deviceScaleFactor: dpr});
+        assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${width}px chat count reflows`);
+        await page.screenshot({path: path.join(artifacts, `codex-chat-count-${theme}-${width}.png`), fullPage: true});
+      }
+    }
+    payload = {...payload, codex_chats: {hidden: 3, running: 0}};
+    await page.waitForFunction(() => !document.querySelector('#now-summary').textContent.includes('Your Codex chats:'));
     const stopped = ['waiting', 'idle', 'blocked', 'hung', 'crashed'].map(status => item(status, 'Working time', {
       kind: 'codex', status, started: at(8, 0), last_at: now - 60, seconds: 125}));
     payload = {now, agents: stopped, completed: []};

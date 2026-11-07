@@ -19,6 +19,7 @@ class Config:
     wrapper_runs: Path | None = None
     routing_file: Path | None = None
     limits_history: Path | None = None
+    show_codex_chats: bool = False
 
     @classmethod
     def load(cls, home, path=None):
@@ -33,8 +34,12 @@ class Config:
         projects = raw.get('projects', {})
         hours = raw.get('work_hours', {})
         paths = raw.get('paths', {})
-        if not all(isinstance(value, dict) for value in (modules, projects, hours, paths)):
+        board = raw.get('board', {})
+        if not all(isinstance(value, dict) for value in (modules, projects, hours, paths, board)):
             raise ValueError('Config sections must be tables')
+        show_codex_chats = board.get('show_codex_chats', False)
+        if not isinstance(show_codex_chats, bool):
+            raise ValueError('board.show_codex_chats must be a boolean')
         for name in MODULES:
             if name in modules and not isinstance(modules[name], bool):
                 raise ValueError(f'modules.{name} must be a boolean')
@@ -65,7 +70,8 @@ class Config:
         start, end = hours.get('start', 9), hours.get('end', 21)
         if (type(start) is not int or type(end) is not int or not 0 <= start < end <= 24):
             raise ValueError('work_hours must satisfy 0 <= start < end <= 24')
-        return cls(modules=enabled, project_order=order, project_mappings=parsed, project_fallback_mappings=fallbacks,
+        return cls(modules=enabled, show_codex_chats=show_codex_chats,
+                   project_order=order, project_mappings=parsed, project_fallback_mappings=fallbacks,
                    inherit_folders=inherit, fallback_project=fallback, work_hours=(start, end),
                    wrapper_runs=local_path(paths.get('codex_runs', '~/.claude/tools/codex-runs')),
                    routing_file=local_path(paths.get('routing', '~/.claude/tools/routing.json')),
