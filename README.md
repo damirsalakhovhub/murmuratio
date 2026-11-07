@@ -32,4 +32,4 @@ All modules are off by default. Set any to `true` under `[modules]` in the confi
 - `codex_wrapper`: reads local Codex wrapper records.
 - `branding`: shows additional board graphics.
 
-For a board with sample data, run `./murmuratio run --demo`. Demo reads no personal session data; the first run can still migrate old Murmuratio directories. For more settings and details, see [the Russian guide](docs/README.ru.md). License: [MIT](LICENSE).
+For a board with sample data, run `./murmuratio run --demo`. Demo reads no personal session data; the first run can still migrate old Murmuratio directories. License: [MIT](LICENSE).
