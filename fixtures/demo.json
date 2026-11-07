@@ -1,0 +1,211 @@
+{
+  "now": 1793880000,
+  "agents": [
+    {
+      "id": "root",
+      "project": "Atlas",
+      "kind": "claude",
+      "who": "Claude Opus 5.5",
+      "model": "claude-opus-5-5",
+      "folder": "atlas",
+      "task": "Review implementation",
+      "started": 1793876400,
+      "last_at": 1793879700,
+      "status": "working",
+      "seconds": 3600,
+      "orchestrator": true,
+      "turn_started": 1793878200,
+      "current_action": "coordinating work"
+    },
+    {
+      "id": "worker",
+      "project": "Atlas",
+      "kind": "claude",
+      "who": "Claude Opus 5.5",
+      "model": "claude-opus-5-5",
+      "folder": "atlas",
+      "task": "Review implementation",
+      "started": 1793876400,
+      "last_at": 1793879700,
+      "status": "working",
+      "seconds": 3600,
+      "parent_id": "root",
+      "current_action": "reviewing changes"
+    },
+    {
+      "id": "approval",
+      "project": "Atlas",
+      "kind": "claude",
+      "who": "Claude Opus 5.5",
+      "model": "claude-opus-5-5",
+      "folder": "atlas",
+      "task": "Review implementation",
+      "started": 1793876400,
+      "last_at": 1793879700,
+      "status": "blocked",
+      "seconds": 3600,
+      "parent_id": "root",
+      "current_action": "waiting for approval"
+    },
+    {
+      "id": "beta",
+      "project": "Northstar",
+      "kind": "claude",
+      "who": "Claude Opus 5.5",
+      "model": "claude-opus-5-5",
+      "folder": "northstar",
+      "task": "Review implementation",
+      "started": 1793876400,
+      "last_at": 1793879700,
+      "status": "working",
+      "seconds": 3600,
+      "orchestrator": true,
+      "turn_started": 1793879100,
+      "current_action": "planning next steps"
+    },
+    {
+      "id": "codex",
+      "project": "Northstar",
+      "kind": "codex",
+      "who": "Codex sol",
+      "model": "gpt-6.1-sol",
+      "folder": "northstar",
+      "task": "Run the test suite",
+      "started": 1793876400,
+      "last_at": 1793879700,
+      "status": "working",
+      "seconds": 3600,
+      "parent_id": "beta",
+      "current_action": "running checks",
+      "thread": "demo-thread"
+    }
+  ],
+  "completed": [
+    {
+      "id": "done",
+      "project": "Atlas",
+      "kind": "claude",
+      "who": "Claude Opus 5.5",
+      "model": "claude-opus-5-5",
+      "folder": "atlas",
+      "task": "Finish the dashboard",
+      "started": 1793876400,
+      "last_at": 1793879700,
+      "status": "done",
+      "seconds": 1800,
+      "parent_id": "root",
+      "completed": true,
+      "ended": 1793879400
+    }
+  ],
+  "limits": {
+    "claude": [
+      {
+        "window_minutes": 300,
+        "used_percent": 20,
+        "resets_at": 1793887200
+      },
+      {
+        "window_minutes": 10080,
+        "used_percent": 35,
+        "resets_at": 1794139200
+      }
+    ],
+    "codex": [
+      {
+        "window_minutes": 300,
+        "used_percent": 20,
+        "resets_at": 1793887200
+      },
+      {
+        "window_minutes": 10080,
+        "used_percent": 52,
+        "resets_at": 1794052800
+      }
+    ]
+  },
+  "forecast": {
+    "claude": {
+      "start": 1793534400,
+      "resets_at": 1794139200,
+      "used_percent": 35,
+      "points": [
+        [
+          1793793600,
+          27
+        ],
+        [
+          1793880000,
+          35
+        ]
+      ],
+      "pace_per_day": 8,
+      "projected_at_reset": 59,
+      "hits_100_at": null,
+      "worker_share": 0.6
+    },
+    "codex": {
+      "start": 1793448000,
+      "resets_at": 1794052800,
+      "used_percent": 52,
+      "points": [
+        [
+          1793793600,
+          44
+        ],
+        [
+          1793880000,
+          52
+        ]
+      ],
+      "pace_per_day": 8,
+      "projected_at_reset": 68,
+      "hits_100_at": null,
+      "credits": {
+        "balance": 12000,
+        "per_hour": 400,
+        "sample_hours": 2
+      }
+    }
+  },
+  "routing": {
+    "code_to": "codex",
+    "claude": {
+      "allowance_per_day": 15,
+      "burn_per_day": 8
+    },
+    "codex": {
+      "allowance_per_day": 12,
+      "burn_per_day": 8
+    }
+  },
+  "credits": {
+    "balance": 12000,
+    "per_hour": 400,
+    "sample_hours": 2
+  },
+  "burn": {
+    "claude": {
+      "start": 1793534400,
+      "hours": [
+        [
+          1793876400,
+          {
+            "claude-opus-5-5": 2.0
+          }
+        ]
+      ]
+    },
+    "codex": {
+      "start": 1793448000,
+      "hours": [
+        [
+          1793876400,
+          {
+            "gpt-6.1-sol": 2.0
+          }
+        ]
+      ]
+    }
+  }
+}

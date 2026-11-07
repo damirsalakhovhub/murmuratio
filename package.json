@@ -1,0 +1,9 @@
+{
+  "private": true,
+  "scripts": {
+    "test:browser": "node browser_modules_test.cjs && node browser_now_test.cjs && node browser_codex_test.cjs"
+  },
+  "devDependencies": {
+    "puppeteer-core": "24.23.0"
+  }
+}

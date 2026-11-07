@@ -1,0 +1,3 @@
+{"type":"turn_context","timestamp":1999800,"payload":{"model":"gpt-6.1-sol"}}
+{"type":"event_msg","timestamp":1999900,"payload":{"type":"token_count","info":{"model_context_window":200000,"last_token_usage":{"input_tokens":100}},"rate_limits":{"primary":{"used_percent":25,"window_minutes":10080,"resets_at":2600000},"credits":{"balance":"80"}}}}
+{"type":"response_item","timestamp":1999950,"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Example message"}]}}

@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>murmuratio</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/panels.js" defer></script>
+  <script src="/now.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body class="now-mode">
+  <!-- murmuratio-branding -->
+  <header class="page-header">
+    <h1>murmuratio</h1>
+    <p id="connection-error" class="error" role="status" hidden></p>
+  </header>
+  <div class="source-bar">
+  <div class="now-title" lang="en"><h1>Agents</h1><p id="now-summary" class="now-summary"></p></div>
+  <div class="now-right" lang="en"><p id="now-limits" class="now-limits"></p>
+  <nav class="source-tabs" role="tablist" aria-label="Source">
+    <button id="tab-now" class="control button" role="tab" aria-selected="true" aria-controls="now-view" type="button">Board</button>
+    <button id="tab-codex" class="control button" role="tab" aria-selected="false" aria-controls="workspace" tabindex="-1" type="button">Codex chats</button>
+  </nav></div>
+  </div>
+  <main id="now-view" class="now-view" role="tabpanel" aria-labelledby="tab-now" lang="en">
+    <p id="now-error" role="status" hidden></p>
+    <section id="now-forecast" class="now-forecast" aria-label="Weekly limit forecast" hidden></section>
+    <div id="now-board" class="now-board"></div>
+  </main>
+  <div id="workspace" class="workspace" role="tabpanel" aria-labelledby="tab-codex" hidden>
+    <aside class="chats surface surface--2" aria-label="Чаты">
+      <div id="codex-filters" class="filter-stack">
+        <label class="filter-stack" for="chat-search"><input id="chat-search" class="control input" type="search" autocomplete="off" placeholder="Найти чат или проект" aria-label="Название или проект"></label>
+        <div class="sidebar-options">
+        <label class="checkbox-control"><input id="show-archive" type="checkbox">Архив</label>
+        <label class="checkbox-control"><input id="show-agents" type="checkbox">Субагенты</label>
+        </div>
+        <p id="chat-count" class="muted" role="status"></p>
+      </div>
+      <label class="checkbox-control hidden-chats-filter"><input id="show-hidden" type="checkbox"><span id="hidden-chats-label">Скрытые</span></label>
+      <nav id="chat-list" aria-label="Чаты Codex"><button id="more-chats" class="control button" type="button" hidden>Ещё чаты</button></nav>
+    </aside>
+    <div id="sidebar-resizer" role="separator" aria-label="Ширина списка чатов" aria-orientation="vertical" aria-controls="chat-list" tabindex="0"></div>
+    <main class="conversation surface surface--2">
+      <header class="conversation-header">
+        <div class="conversation-heading">
+          <h2 id="session-title">Выберите чат</h2>
+        </div>
+        <button id="reset-context" class="control button" type="button" hidden>Сбросить контекст</button>
+      </header>
+      <p id="session-error" class="error" role="alert" hidden></p>
+      <section id="reset-result" class="reset-result" aria-live="polite" hidden>
+        <div id="reset-result-line"></div>
+        <p id="reset-result-note" class="muted"></p>
+      </section>
+      <section id="analysis" class="analysis" aria-label="Разбор чата" hidden></section>
+      <details id="event-log" class="event-log" open hidden>
+        <summary id="event-log-summary">События чата</summary>
+        <div class="event-log-body">
+        <button id="collapse-all" class="control button" type="button" hidden>Свернуть все ответы</button>
+      <button id="older-events" class="control button" type="button" hidden>Ранее</button>
+      <div id="feed" tabindex="0" aria-label="Сообщения и события чата"></div>
+      <button id="new-events" class="control button button--primary" type="button" hidden>Новые события ↓</button>
+        </div>
+      </details>
+    </main>
+  </div>
+  <dialog id="reset-dialog" aria-labelledby="reset-title" aria-describedby="reset-description">
+    <div class="reset-dialog-content">
+      <h2 id="reset-title">Создать новое окно контекста?</h2>
+      <p id="reset-description">Эксперимент: чат <strong id="reset-chat-name"></strong> сохранит ID и историю, а часть старых сообщений останется в служебных данных. Агент может получить к ним доступ. Это не то же самое, что новый чат.</p>
+      <p>Контрольные вопросы отправляете вы сами. После операции откройте чат и отправьте тот же короткий вопрос без инструментов на прежней модели, чтобы сравнить объём контекста.</p>
+      <p id="reset-compaction" class="muted" hidden></p>
+      <p>Для безопасности откройте инспектор в Chrome или Safari, завершите задачи и закройте приложение ChatGPT / Codex и остальные процессы Codex. Не открывайте их до окончания сброса.</p>
+      <p id="reset-dialog-status" class="muted" role="status"></p>
+      <div class="reset-dialog-actions">
+        <button id="reset-cancel" class="control button" type="button">Отмена</button>
+        <button id="reset-confirm" class="control button button--danger" type="button" disabled>Создать окно</button>
+      </div>
+    </div>
+  </dialog>
+</body>
+</html>

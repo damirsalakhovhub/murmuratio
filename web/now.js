@@ -1,0 +1,812 @@
+'use strict';
+window.createNowView = ({node, text}) => {
+  const board = document.getElementById('now-board');
+  const summary = document.getElementById('now-summary');
+  const limitsEl = document.getElementById('now-limits');
+  const error = document.getElementById('now-error');
+  const groups = new Map(), cards = new Map();
+  // An approval request needs the owner even when it comes from a worker.
+  const needsYou = agent => !agent.completed && agent.status === 'blocked' && (agent.orchestrator || agent.current_action === 'waiting for approval');
+  let modules = {}, projectOrder = [];
+  const svgNS = 'http://www.w3.org/2000/svg';
+  let queued = null, overBoard = false, loadedBuild = '';
+  const clock = at => Number.isFinite(at) ? new Date(at * 1000).toLocaleTimeString('en-GB', {hour: '2-digit', minute: '2-digit'}) : '—';
+  const minutes = seconds => `${Math.floor(Math.max(0, seconds || 0) / 60)} min`;
+  const sameDay = (a, b) => Number.isFinite(a) && new Date(a * 1000).toDateString() === new Date(b * 1000).toDateString();
+  // One format everywhere: when it started and how long it has worked.
+  function timeLine(agent, now) {
+    if (agent.orchestrator) {
+      return agent.status === 'working' ? [clock(agent.turn_started), minutes(now - agent.turn_started)]
+        : [`Last reply ${clock(agent.waiting_since ?? agent.last_at)}`];
+    }
+    const finished = agent.completed || ['done', 'crashed'].includes(agent.status);
+    const stop = finished ? (agent.ended ?? agent.last_at) : ['waiting', 'idle', 'blocked'].includes(agent.status)
+      ? (agent.waiting_since ?? agent.last_at) : now;
+    const worked = finished && Number.isFinite(agent.seconds) ? agent.seconds
+      : Number.isFinite(agent.started) && Number.isFinite(stop) ? stop - agent.started : agent.seconds;
+    return [clock(agent.started), minutes(worked)];
+  }
+  function modelLabel(agent) {
+    if (agent.kind === 'claude') return (agent.who || 'Claude').replace(/^Claude\s*/, '') || 'Claude';
+    return (agent.model || 'Codex').replace(/^gpt-/, 'GPT-').replace(/-(sol|terra|luna|astra)$/i, (_, tier) => ' ' + tier[0].toUpperCase() + tier.slice(1));
+  }
+  function statusText(agent) {
+    switch (agent.status) {
+      case 'working': return ['Running', agent.current_action];
+      case 'waiting': return [agent.orchestrator ? 'Quiet' : 'Turn finished'];
+      case 'idle': return ['Idle', 'agents working'];
+      case 'done': return ['Done'];
+      case 'blocked': return ['Blocked', agent.current_action];
+      case 'hung': return ['Stalled', 'no events for 10 min'];
+      case 'crashed': return ['Stopped', 'process exited'];
+      default: return [''];
+    }
+  }
+  function limitState(window, now) {
+    const percent = Math.max(0, Math.min(100, Math.round(window.used_percent)));
+    const span = (window.window_minutes || 0) * 60;
+    const left = Number.isFinite(window.resets_at) ? Math.max(0, window.resets_at - now) : null;
+    const elapsed = span && left !== null ? Math.min(1, Math.max(0.01, 1 - left / span)) : null;
+    const pace = elapsed ? percent / 100 / elapsed : 0;
+    const level = percent >= 75 || (percent >= 40 && pace >= 1.3) ? 'crit'
+      : percent >= 50 || pace > 1.05 ? 'warn' : 'ok';
+    const reset = left === null ? '' : left >= 86400 ? `${Math.round(left / 86400)}d` : `${Math.round(left / 3600)}h`;
+    return {percent, elapsed, level, reset};
+  }
+  function limitRing(window, state) {
+    const ring = document.createElementNS(svgNS, 'svg');
+    ring.setAttribute('viewBox', '0 0 36 36'); ring.classList.add('now-gauge-ring');
+    ring.setAttribute('aria-hidden', 'true');
+    function circle(className, radius, attributes = {}) {
+      const el = document.createElementNS(svgNS, 'circle'); el.setAttribute('class', className);
+      for (const [key, value] of Object.entries({cx: 18, cy: 18, r: radius, ...attributes})) el.setAttribute(key, String(value));
+      ring.append(el);
+    }
+    circle('track', 15.5);
+    circle('arc ' + state.level, 15.5, {pathLength: 100, 'stroke-dasharray': `${state.percent} 100`});
+    // The inner time ring is segmented into seven days or five hours.
+    const parts = window.window_minutes >= 10080 ? 7 : Math.max(1, Math.round((window.window_minutes || 60) / 60));
+    const gap = 3, slot = 100 / parts, segment = slot - gap, done = (state.elapsed ?? 0) * 100;
+    for (let i = 0; i < parts; i++) {
+      const start = i * slot, fill = Math.max(0, Math.min(segment, done - start));
+      for (const [className, length] of [['time-track', segment], ['time-arc', fill]]) {
+        if (length) circle(className, 10.5, {pathLength: 100, 'stroke-dasharray': `${length} ${100 - length}`,
+          'stroke-dashoffset': -(start + gap / 2)});
+      }
+    }
+    const wrap = node('span', 'now-gauge-wrap');
+    wrap.append(ring, node('span', 'now-gauge-pct', state.percent + '%'));
+    return wrap;
+  }
+  function limitLogo(kind, codeLeader) {
+    const icon = document.createElementNS(svgNS, 'svg'), use = document.createElementNS(svgNS, 'use');
+    icon.setAttribute('aria-label', kind === 'claude' ? 'Claude' : 'Codex');
+    // The tool that gets the code today shows its builder instead of the logo.
+    use.setAttribute('href', '#now-' + kind + (codeLeader ? '-builder' : '')); icon.classList.add('now-gauge-logo'); icon.append(use);
+    if (codeLeader) icon.setAttribute('aria-label', (kind === 'claude' ? 'Claude' : 'Codex') + ' gets the code today');
+    return icon;
+  }
+  function paceMark(window, stats) {
+    if (window.window_minutes !== 10080 || !Number.isFinite(stats?.allowance_per_day)
+        || !Number.isFinite(stats?.burn_per_day) || stats.burn_per_day <= 0) return null;
+    const fast = stats.burn_per_day > stats.allowance_per_day * 1.05, slow = stats.burn_per_day < stats.allowance_per_day * 0.95;
+    if (!fast && !slow) return null;
+    const mark = node('span', 'now-gauge-pace', fast ? '↑' : '↓');
+    tip(mark, {title: fast ? 'Faster than the weekly pace' : 'Slower than the weekly pace',
+      rows: [['Spending', `${Math.round(stats.burn_per_day)}% a day`], ['Allowance', `${Math.round(stats.allowance_per_day)}% a day`]]});
+    return mark;
+  }
+  // Tooltips: the first one waits, the next ones show at once while the pointer moves between items.
+  const tipEl = node('div', 'now-tip'); tipEl.setAttribute('role', 'tooltip'); tipEl.hidden = true; document.body.append(tipEl);
+  let tipTarget = null, tipTimer = 0, tipWarmUntil = 0;
+  // A tooltip is a title, an optional note and label/value rows.
+  function tip(el, content) { el.nowTip = content; el.dataset.tip = ''; }
+  function showTip(el) {
+    fillTip(el.nowTip || {}); tipTarget = el;
+    const r = el.getBoundingClientRect(), w = tipEl.offsetWidth;
+    tipEl.style.left = Math.max(10, Math.min(innerWidth - w - 10, r.left + r.width / 2 - w / 2)) + 'px';
+    tipEl.style.top = (r.bottom + 10) + 'px';
+  }
+  function fillTip({title, note, rows = []}) {
+    const parts = [node('div', 'now-tip-title', title)];
+    if (note) parts.push(node('div', 'now-tip-note', note));
+    if (rows.length) {
+      const grid = node('div', 'now-tip-rows');
+      for (const [label, value] of rows) grid.append(node('span', 'now-tip-label', label), node('span', 'now-tip-value', value));
+      parts.push(grid);
+    }
+    tipEl.replaceChildren(...parts); tipEl.hidden = false;
+  }
+  function hideTip() { clearTimeout(tipTimer); if (!tipEl.hidden) tipWarmUntil = performance.now() + 300; tipEl.hidden = true; tipTarget = null; }
+  limitsEl.addEventListener('pointerover', event => {
+    const el = event.target.closest?.('[data-tip]');
+    if (!el || el === tipTarget) return;
+    clearTimeout(tipTimer);
+    if (!tipEl.hidden || performance.now() < tipWarmUntil) showTip(el);
+    else tipTimer = setTimeout(() => showTip(el), 500);
+  });
+  limitsEl.addEventListener('pointerout', event => {
+    const next = event.relatedTarget?.closest?.('[data-tip]');
+    if (next && limitsEl.contains(next)) return;
+    hideTip();
+  });
+  addEventListener('scroll', hideTip, {passive: true});
+  function renderLimits(data) {
+    const activeKey = tipTarget?.dataset.tipKey;
+    limitsEl.replaceChildren();
+    const routing = modules.routing ? data.routing : null;
+    for (const kind of ['claude', 'codex']) {
+      const windows = [...(data.limits?.[kind] || [])].sort((a, b) => a.window_minutes - b.window_minutes);
+      for (const [index, window] of windows.entries()) {
+        const state = limitState(window, data.now), item = node('span', 'now-gauge');
+        item.dataset.tool = kind; item.dataset.level = state.level;
+        item.setAttribute('aria-label', `${kind === 'claude' ? 'Claude' : 'Codex'} ${window.window_minutes >= 10080 ? 'week' : '5h'} ${state.percent}% used`);
+        const label = node('span', 'now-gauge-label');
+        const name = kind === 'claude' ? 'Claude' : 'Codex', week = window.window_minutes >= 10080;
+        const span = week ? 'week' : Math.round(window.window_minutes / 60) + '-hour';
+        const win = node('span', 'now-gauge-win', week ? 'week' : Math.round(window.window_minutes / 60) + 'h');
+        tip(win, {title: `${name} ${span} window`, note: week ? 'Usage counts over a rolling week' : `Usage counts over a rolling ${span.replace('-hour', ' hours')}`});
+        const resetLine = node('span', 'now-gauge-reset'), reset = node('span', '', state.reset);
+        if (Number.isFinite(window.resets_at)) tip(reset, {title: `${name} ${span} reset`, rows: [['In', state.reset],
+          ['At', new Date(window.resets_at * 1000).toLocaleString('en-GB', {weekday: week ? 'short' : undefined, hour: '2-digit', minute: '2-digit'})]]});
+        const pace = paceMark(window, routing?.[kind]);
+        resetLine.append(reset, ...(pace ? [' ', pace] : []));
+        label.append(win, resetLine);
+        if (!index) {
+          const other = kind === 'claude' ? 'Codex' : 'Claude';
+          const holder = node('span', 'now-gauge-logo-wrap');
+          if (modules.branding) holder.append(limitLogo(kind, routing?.code_to === kind));
+          else holder.textContent = name;
+          tip(holder, routing?.code_to === kind ? {title: `${name} gets the code today`, note: 'It has more weekly quota left'}
+            : routing?.code_to ? {title: name, note: `Code goes to ${other} today`} : {title: name});
+          item.append(holder);
+        }
+        const ring = limitRing(window, state);
+        tip(ring, {title: `${name} ${span} limit`, rows: [['Used', `${state.percent}%`],
+          ['Time passed', `${Math.round((state.elapsed ?? 0) * 100)}%`], ...(state.reset ? [['Resets in', state.reset]] : [])]});
+        item.append(ring, label); limitsEl.append(item);
+        for (const [el, part] of [[win, 'win'], [reset, 'reset'], [ring, 'ring'], [item.querySelector('.now-gauge-logo-wrap'), 'logo'], [pace, 'pace']]) {
+          if (el) el.dataset.tipKey = `${kind}-${window.window_minutes}-${part}`;
+        }
+      }
+    }
+    const credit = modules.codex_credits ? data.credits : null;
+    if (credit && Number.isFinite(credit.balance)) {
+      const item = node('span', 'now-credits'), value = node('span', 'now-credits-value',
+        credit.balance >= 1000 ? (credit.balance / 1000).toFixed(1) + 'k' : String(Math.round(credit.balance)));
+      item.append(value, node('span', 'now-credits-label', 'credits'));
+      tip(item, {title: 'Codex credits', note: 'Spent only after the weekly limit hits 100%',
+        rows: [['Balance', Math.round(credit.balance).toLocaleString('en-US')],
+          ...(credit.per_hour ? [['Spend', `about ${Math.round(credit.per_hour)} an hour of work`], ['Lasts', `about ${Math.round(credit.balance / credit.per_hour)} work hours`],
+            ['Measured on', `${Math.round(credit.sample_hours * 60)} min of use`]] : [])]});
+      item.dataset.tipKey = 'codex-credits';
+      limitsEl.append(item);
+    }
+    // A live refresh replaces the nodes; keep an open tooltip on the same item.
+    const again = activeKey && limitsEl.querySelector(`[data-tip-key="${activeKey}"]`);
+    if (again) showTip(again); else if (activeKey) hideTip();
+  }
+  // Weekly forecast: actual usage (solid), straight forecast at the week's average pace (dashed),
+  // and the even pace that lands exactly on 100% at reset (faint). One % axis, shared time axis.
+  const forecastEl = document.getElementById('now-forecast');
+  let forecastKey = '', forecastData = null;
+  const toolName = tool => tool === 'claude' ? 'Claude' : 'Codex';
+  const when = at => new Date(at * 1000).toLocaleString('en-GB', {weekday: 'short', hour: '2-digit', minute: '2-digit'});
+  const span = seconds => {
+    const h = Math.round(Math.max(0, seconds) / 3600);
+    return h >= 24 ? `${Math.floor(h / 24)}d ${h % 24}h` : `${h}h`;
+  };
+  // Usage is spread across the configured local work hours; nights stay flat.
+  let WORK = [9, 21], WORK_DAY = 12;
+  function workHours(a, b) {
+    if (!(b > a)) return 0;
+    let total = 0;
+    const d = new Date(a * 1000); d.setHours(0, 0, 0, 0);
+    for (let day = d.getTime() / 1000; day < b; ) {
+      const next = new Date(day * 1000); next.setDate(next.getDate() + 1); next.setHours(0, 0, 0, 0);
+      const open = new Date(day * 1000); open.setHours(WORK[0], 0, 0, 0);
+      const close = new Date(day * 1000); close.setHours(WORK[1], 0, 0, 0);
+      total += Math.max(0, Math.min(b, close / 1000) - Math.max(a, open / 1000));
+      day = next.getTime() / 1000;
+    }
+    return total / 3600;
+  }
+  function addWorkHours(t, hours) {
+    let at = t, left = hours * 3600;
+    for (let i = 0; i < 400 && left > 0; i++) {
+      const open = new Date(at * 1000); open.setHours(WORK[0], 0, 0, 0);
+      const close = new Date(at * 1000); close.setHours(WORK[1], 0, 0, 0);
+      if (at < open / 1000) at = open / 1000;
+      if (at >= close / 1000) { const n = new Date(at * 1000); n.setDate(n.getDate() + 1); n.setHours(WORK[0], 0, 0, 0); at = n / 1000; continue; }
+      const step = Math.min(left, close / 1000 - at); at += step; left -= step;
+    }
+    return at;
+  }
+  // Work-hour breakpoints make the stepped lines bend in the right places.
+  function workBreaks(a, b) {
+    const out = [a], d = new Date(a * 1000); d.setHours(0, 0, 0, 0);
+    for (let i = 0; i < 20; i++) {
+      for (const h of WORK) { const t = new Date(d); t.setHours(h, 0, 0, 0); if (t / 1000 > a && t / 1000 < b) out.push(t / 1000); }
+      d.setDate(d.getDate() + 1); if (d / 1000 > b) break;
+    }
+    out.push(b); return out;
+  }
+  const baseRate = (f, now) => { const h = workHours(f.start, now); return h >= 3 ? f.used_percent / h : null; };
+  function verdict(f) {
+    if (!Number.isFinite(f.pace_per_day)) return {text: 'not enough data yet', level: 'ok'};
+    if (Number.isFinite(f.hits_100_at) && f.cap > 100) {
+      return Number.isFinite(f.credits_out_at)
+        ? {text: `limit ${when(f.hits_100_at)}, credits out ${when(f.credits_out_at)}`, level: 'crit'}
+        : {text: `limit ${when(f.hits_100_at)}, then credits`, level: 'warn'};
+    }
+    if (Number.isFinite(f.hits_100_at)) return {text: `out ${when(f.hits_100_at)}, ${span(f.resets_at - f.hits_100_at)} early`, level: 'crit'};
+    const end = Math.round(f.projected_at_reset);
+    return {text: `fits, ${end}% at reset`, level: end >= 90 ? 'warn' : 'ok'};
+  }
+  // Scenarios move worker tasks between the tools. Claude's chats (orchestrators, the owner's own chats)
+  // stay on Claude whatever the split; only its worker part scales with the share of work.
+  const scenarios = [['now', 'As now'], ['rebalance', 'Rebalance'], ['claude', 'All Claude'], ['codex', 'All Codex']];
+  let scenario = 'now';
+  try { scenario = localStorage.getItem('now-forecast-scenario') || 'now'; } catch {}
+  if (!scenarios.some(([id]) => id === scenario)) scenario = 'now';
+  function project(f, rate, now) {
+    if (!Number.isFinite(rate)) return {...f, rate: null, pace_per_day: null, projected_at_reset: null, hits_100_at: null};
+    const projected = f.used_percent + rate * workHours(now, f.resets_at);
+    const hits = projected > 100 && rate > 0 ? addWorkHours(now, (100 - f.used_percent) / rate) : null;
+    // Codex credits extend the week past 100%: `cap` is 100% plus what the balance buys, in weekly %.
+    const cap = f.cap || 100;
+    const out = projected > cap && rate > 0 && cap > 100 ? addWorkHours(now, (cap - f.used_percent) / rate) : null;
+    return {...f, rate, pace_per_day: rate * WORK_DAY, projected_at_reset: projected, hits_100_at: hits, credits_out_at: out};
+  }
+  function plan(forecast, now, share) {
+    const c = forecast.claude, x = forecast.codex, rc = c && baseRate(c, now), rx = x && baseRate(x, now);
+    if (!Number.isFinite(rc) || !Number.isFinite(rx)) return null;
+    const s0 = Math.min(0.9, Math.max(0.1, share)), movable = Number.isFinite(c.worker_share) ? c.worker_share : 1;
+    const fixedC = rc * (1 - movable), unitC = rc * movable / (1 - s0), unitX = rx / s0;
+    const at = s => ({claude: project(c, fixedC + unitC * (1 - s), now), codex: project(x, unitX * s, now), share: s});
+    // Fullness against each tool's capacity (Codex: limit plus credits), in % of that capacity.
+    const worst = r => Math.max(r.claude.projected_at_reset, r.codex.projected_at_reset / (x.cap || 100) * 100);
+    let best = at(0);
+    for (let i = 1; i <= 100; i++) { const r = at(i / 100); if (worst(r) < worst(best)) best = r; }
+    // «As now» keeps each tool's measured pace exactly.
+    return {now: {claude: project(c, rc, now), codex: project(x, rx, now), share}, rebalance: best, claude: at(0), codex: at(1), worst, movable};
+  }
+  function workShare(agents, now) {
+    const sec = {claude: 0, codex: 0};
+    for (const a of agents) {
+      if (a.orchestrator || !Number.isFinite(a.seconds) || !sameDay(a.ended ?? a.last_at, now)) continue;
+      if (a.kind in sec) sec[a.kind] += a.seconds;
+    }
+    const total = sec.claude + sec.codex;
+    return total ? sec.codex / total : 0.5;
+  }
+  // Answers: a plain label, then short values; a tool's value starts with that tool's icon.
+  function answers(forecast, now, share) {
+    const p = modules.scenarios ? plan(forecast, now, share) : null, pct = v => Math.round(v * 100) + '%';
+    const out = [];
+    const view = p ? p[scenario] : Object.fromEntries(Object.entries(forecast).map(([t, f]) => [t, f && project(f, baseRate(f, now), now)]));
+    if (p) out.push([scenario === 'now' ? 'Work split today' : 'Work split', [[pct(1 - view.share), 'claude'], [pct(view.share), 'codex']], 'Share of worker time per tool']);
+    if (p && scenario === 'rebalance') {
+      const w = Math.round(p.worst(p.rebalance));
+      out.push(['Best split result', [[w <= 100 ? `both fit, fuller at ${w}%` : `short by ${w - 100}%`]], 'With the best split, the fuller tool ends at this % of its capacity']);
+    }
+    const cr = modules.codex_credits ? forecast.codex?.credits : null;
+    if (cr && forecast.codex.cap > 100) out.push(['Codex credits', [[`${Math.round(cr.balance).toLocaleString('en-US')}, ~${Math.round(cr.balance / cr.per_hour)} hours`, 'codex']], 'Used only after the weekly limit hits 100%']);
+    if (p && p.movable < 1) out.push(['Claude use', [[`chats ${pct(1 - p.movable)}, tasks ${pct(p.movable)}`, 'claude']], 'Chats: orchestrators and your own chats, they stay on Claude. Tasks: worker sessions, they can move to Codex']);
+    const budget = ['claude', 'codex'].filter(t => forecast[t] && workHours(now, forecast[t].resets_at) > 0)
+      .map(t => [`${Math.round((100 - forecast[t].used_percent) / workHours(now, forecast[t].resets_at) * WORK_DAY)}%/day`, t]);
+    if (budget.length) out.push(['To last until reset', budget, 'Most each tool can spend per work day and still last to its reset']);
+    out.push(['Work hours', [[`${WORK[0]}:00–${WORK[1]}:00`]], 'Usage is expected only in these hours; nights stay flat']);
+    return {view, rows: out};
+  }
+  // The block has two views: the weekly forecast and the burn rate by model.
+  let blockView = 'forecast', burnPeriod = 'today', burnData = {};
+  try { blockView = localStorage.getItem('now-block-view') === 'burn' ? 'burn' : 'forecast'; burnPeriod = localStorage.getItem('now-burn-period') === 'week' ? 'week' : 'today'; } catch {}
+  function segmented(options, current, label, onPick) {
+    const group = node('div', 'now-forecast-scenarios'); group.setAttribute('role', 'radiogroup'); group.setAttribute('aria-label', label);
+    for (const [id, text] of options) {
+      const b = node('button', 'now-forecast-scenario', text); b.type = 'button';
+      b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', String(id === current)); b.dataset.option = id;
+      b.addEventListener('click', () => onPick(id));
+      group.append(b);
+    }
+    return group;
+  }
+  function rerender() { forecastKey = ''; if (forecastData) renderForecast(forecastData.forecast, forecastData.now, forecastData.share); }
+  const viewSwitch = () => segmented([['forecast', 'Forecast'], ['burn', 'Burn rate']], blockView, 'View', id => {
+    blockView = id; try { localStorage.setItem('now-block-view', id); } catch {}
+    rerender();
+  });
+  const MODELS = [[/fable/i, 'Fable', 'fable'], [/opus/i, 'Opus', 'opus'], [/sonnet/i, 'Sonnet', 'sonnet'], [/haiku/i, 'Haiku', 'haiku'],
+    [/terra/i, 'Terra', 'terra'], [/sol/i, 'Sol', 'sol'], [/luna/i, 'Luna', 'luna']];
+  const family = model => MODELS.find(([re]) => re.test(model)) || [null, 'Other', 'other'];
+  function renderBurn(now) {
+    const tools = ['claude', 'codex'].filter(t => burnData[t]?.hours?.length);
+    const head = node('div', 'now-forecast-head'), top = node('div', 'now-forecast-top'), bottom = node('div', 'now-forecast-bottom');
+    const title = node('p', 'now-forecast-verdict');
+    title.append(node('b', '', 'Weekly limit spent per ' + (burnPeriod === 'today' ? 'hour, today' : 'day, this week')));
+    const period = segmented([['today', 'Today'], ['week', 'Week']], burnPeriod, 'Period', id => {
+      burnPeriod = id; try { localStorage.setItem('now-burn-period', id); } catch {}
+      rerender();
+    });
+    period.classList.add('now-burn-period');
+    top.append(title, period, ...(modules.forecast ? [viewSwitch()] : []));
+    // Bins: today's hours, or the days of each tool's week.
+    const day0 = new Date(now * 1000); day0.setHours(0, 0, 0, 0);
+    const bins = tool => {
+      if (burnPeriod === 'today') return Array.from({length: 24}, (_, h) => day0 / 1000 + h * 3600);
+      const first = new Date(burnData[tool].start * 1000); first.setHours(0, 0, 0, 0);
+      return Array.from({length: 8}, (_, d) => { const x = new Date(first); x.setDate(x.getDate() + d); return x / 1000; });
+    };
+    const seen = new Map();
+    const series = Object.fromEntries(tools.map(tool => {
+      const edges = bins(tool), sums = edges.map(() => ({}));
+      for (const [hour, by] of burnData[tool].hours) {
+        const i = edges.findLastIndex(edge => hour >= edge);
+        if (i < 0 || (burnPeriod === 'today' && hour >= edges[0] + 86400)) continue;
+        for (const [model, pct] of Object.entries(by)) {
+          const [, name, key] = family(model); seen.set(key, name);
+          sums[i][key] = (sums[i][key] || 0) + pct;
+        }
+      }
+      return [tool, {edges, sums}];
+    }));
+    const legend = node('p', 'now-forecast-legend now-burn-legend');
+    for (const [, name, key] of [...MODELS, [null, 'Other', 'other']]) {
+      if (!seen.has(key)) continue;
+      const k = node('span', 'now-forecast-key'); k.dataset.model = key; k.append(node('i', 'now-burn-swatch'), name); legend.append(k);
+    }
+    const note = node('p', 'now-burn-note', 'Claude per model is estimated from token cost; Codex from its meter in 1% steps');
+    bottom.append(note, legend);
+    head.append(top, bottom);
+    forecastEl.replaceChildren(head);
+    const charts = node('div', 'now-burn-charts');
+    const W = Math.max(300, (forecastEl.clientWidth - 20 - 20) / 2), H = 500 - 20 - 90 - 10, pad = {l: 40, r: 10, t: 25, b: 30};
+    for (const tool of tools) {
+      const {edges, sums} = series[tool];
+      const totals = sums.map(s => Object.values(s).reduce((a, b) => a + b, 0));
+      const top = Math.max(1, ...totals) * 1.15, step = top > 20 ? 10 : top > 8 ? 5 : top > 4 ? 2 : top > 2 ? 1 : 0.5;
+      const svg = document.createElementNS(svgNS, 'svg');
+      svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('width', W); svg.setAttribute('height', H);
+      svg.classList.add('now-forecast-chart', 'now-burn-chart'); svg.dataset.tool = tool; svg.setAttribute('role', 'img');
+      svg.setAttribute('aria-label', `${toolName(tool)}: weekly limit spent per ${burnPeriod === 'today' ? 'hour' : 'day'}, by model`);
+      const add = (tag, attrs, parent = svg) => {
+        const el = document.createElementNS(svgNS, tag);
+        for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
+        parent.append(el); return el;
+      };
+      const Y = v => pad.t + (1 - v / top) * (H - pad.t - pad.b), slot = (W - pad.l - pad.r) / edges.length;
+      add('text', {x: pad.l, y: 15, class: 'label'}).textContent = toolName(tool);
+      for (let v = 0; v <= top; v += step) {
+        add('line', {x1: pad.l, x2: W - pad.r, y1: Y(v), y2: Y(v), class: 'grid'});
+        add('text', {x: pad.l - 10, y: Y(v) + 4, class: 'axis', 'text-anchor': 'end'}).textContent = (step < 1 ? v.toFixed(1) : v) + '%';
+      }
+      edges.forEach((edge, i) => {
+        const x = pad.l + i * slot, label = burnPeriod === 'today'
+          ? (i % 3 ? '' : String(i).padStart(2, '0'))
+          : new Date(edge * 1000).toLocaleDateString('en-GB', {weekday: 'short'});
+        if (label) add('text', {x: x + slot / 2, y: H - 10, class: 'axis', 'text-anchor': 'middle'}).textContent = label;
+        let base = 0;
+        const g = add('g', {class: 'now-burn-bar'});
+        for (const [, , key] of [...MODELS, [null, 'Other', 'other']]) {
+          const v = sums[i][key]; if (!v) continue;
+          add('rect', {x: x + slot * 0.15, width: slot * 0.7, y: Y(base + v), height: Math.max(1, Y(base) - Y(base + v) - 1), rx: 2, 'data-model': key}, g);
+          base += v;
+        }
+        add('rect', {x, y: pad.t, width: slot, height: H - pad.t - pad.b, class: 'hit'}, g).addEventListener('pointermove', event => {
+          const rows = Object.entries(sums[i]).sort((a, b) => b[1] - a[1]).map(([key, v]) => [seen.get(key) || key, v.toFixed(1) + '%']);
+          fillTip({title: burnPeriod === 'today' ? `${String(i).padStart(2, '0')}:00–${String(i + 1).padStart(2, '0')}:00` : new Date(edge * 1000).toLocaleDateString('en-GB', {weekday: 'long', day: 'numeric'}),
+            note: rows.length ? `${totals[i].toFixed(1)}% of the ${toolName(tool)} week` : 'Nothing spent', rows});
+          const w = tipEl.offsetWidth;
+          tipEl.style.left = Math.max(10, Math.min(innerWidth - w - 10, event.clientX + 15)) + 'px';
+          tipEl.style.top = (event.clientY + 15) + 'px';
+        });
+        g.lastChild.addEventListener('pointerleave', () => { tipEl.hidden = true; });
+      });
+      if (burnPeriod === 'today') {
+        const x = pad.l + (now - edges[0]) / 3600 * slot;
+        add('line', {x1: x, x2: x, y1: pad.t, y2: H - pad.b, class: 'now'});
+      }
+      charts.append(svg);
+    }
+    if (!tools.length) charts.append(node('p', 'now-burn-note', 'No usage recorded this week yet'));
+    forecastEl.append(charts);
+  }
+  function renderForecast(forecast, now, share = 0.5) {
+    const tools = ['claude', 'codex'].filter(tool => forecast?.[tool]);
+    if (!modules.forecast) blockView = 'burn';
+    if (!modules.burn_rate) blockView = 'forecast';
+    if (!modules.scenarios) scenario = 'now';
+    const visible = blockView === 'burn' ? modules.burn_rate && (Object.keys(burnData).length || modules.forecast && tools.length) : modules.forecast && tools.length;
+    forecastEl.hidden = !visible;
+    if (!visible) { forecastData = null; return; }
+    const key = JSON.stringify([forecast, Math.floor(now / 300), Math.round(share * 100), scenario, forecastEl.clientWidth, blockView, burnPeriod, burnData]);
+    if (key === forecastKey) return;
+    if (blockView === 'burn') { forecastKey = key; forecastData = {forecast, now, share}; renderBurn(now); return; }
+    if (key === forecastKey) return;
+    forecastKey = key; forecastData = {forecast: forecast, now, share};
+    // Credits in weekly % at today's Codex pace: hours of credit use times % per work hour.
+    const credit = modules.codex_credits ? forecast.codex?.credits : null, rx = forecast.codex && baseRate(forecast.codex, now);
+    if (credit && credit.balance > 0 && credit.per_hour > 0 && Number.isFinite(rx)) {
+      forecast = {...forecast, codex: {...forecast.codex, cap: 100 + credit.balance / credit.per_hour * rx}};
+    }
+    const result = answers(forecast, now, share);
+    forecast = {...forecast, ...Object.fromEntries(tools.map(t => [t, result.view[t] || forecast[t]]))};
+    const head = node('div', 'now-forecast-head');
+    const top = node('div', 'now-forecast-top');
+    const verdicts = node('div', 'now-forecast-verdicts');
+    for (const tool of tools) {
+      const v = verdict(forecast[tool]), item = node('p', 'now-forecast-verdict');
+      item.dataset.tool = tool; item.dataset.level = v.level;
+      item.append(node('span', 'now-forecast-swatch'), node('b', '', toolName(tool)), node('span', '', v.text));
+      verdicts.append(item);
+    }
+    const switcher = node('div', 'now-forecast-scenarios'); switcher.setAttribute('role', 'radiogroup'); switcher.setAttribute('aria-label', 'Scenario');
+    for (const [id, label] of scenarios) {
+      const b = node('button', 'now-forecast-scenario', label); b.type = 'button';
+      b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', String(id === scenario)); b.dataset.scenario = id;
+      b.addEventListener('click', () => {
+        scenario = id; try { localStorage.setItem('now-forecast-scenario', id); } catch {}
+        forecastKey = ''; renderForecast(forecastData.forecast, forecastData.now, forecastData.share);
+      });
+      switcher.append(b);
+    }
+    top.append(verdicts, ...(modules.scenarios ? [switcher] : []), ...(modules.burn_rate ? [viewSwitch()] : []));
+    // Answers sit side by side (label over value), so the chart keeps the same height in every scenario.
+    const facts = node('div', 'now-forecast-answers');
+    for (const [label, value, hint] of result.rows) {
+      const fact = node('div', 'now-forecast-fact'), values = node('span', 'now-forecast-fact-values');
+      for (const [text, tool] of value) {
+        const v = node('span', 'now-forecast-value');
+        if (tool && modules.branding) {
+          const icon = document.createElementNS(svgNS, 'svg'), use = document.createElementNS(svgNS, 'use');
+          icon.setAttribute('aria-label', toolName(tool)); use.setAttribute('href', '#now-' + tool); icon.append(use); v.append(icon);
+        } else if (tool) v.append(toolName(tool) + ' ');
+        v.append(text); values.append(v);
+      }
+      fact.append(node('span', 'now-forecast-fact-label', label), values);
+      fact.title = hint;
+      facts.append(fact);
+    }
+    const legend = node('p', 'now-forecast-legend');
+    for (const [cls, label] of [['actual', 'used'], ['projected', 'forecast'], ['even', 'even pace']]) {
+      const k = node('span', 'now-forecast-key ' + cls); k.append(node('i'), label); legend.append(k);
+    }
+    const bottom = node('div', 'now-forecast-bottom'); bottom.append(facts, legend);
+    head.append(top, bottom);
+    forecastEl.replaceChildren(head);
+    const W = Math.max(300, forecastEl.clientWidth - 20), H = 500 - 20 - 90 - 10; // fixed head height keeps the chart the same size
+    const pad = {l: 40, r: 120, t: 15, b: 30};
+    const x0 = Math.min(...tools.map(t => forecast[t].start)), x1 = Math.max(...tools.map(t => forecast[t].resets_at));
+    const X = at => pad.l + (at - x0) / (x1 - x0) * (W - pad.l - pad.r);
+    const Y = pct => pad.t + (1 - Math.min(110, Math.max(0, pct)) / 110) * (H - pad.t - pad.b);
+    const svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('width', W); svg.setAttribute('height', H);
+    svg.classList.add('now-forecast-chart'); svg.setAttribute('role', 'img');
+    svg.setAttribute('aria-label', tools.map(t => `${toolName(t)}: ${verdict(forecast[t]).text}`).join('. '));
+    const add = (tag, attrs, parent = svg) => {
+      const el = document.createElementNS(svgNS, tag);
+      for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
+      parent.append(el); return el;
+    };
+    for (const pct of [0, 25, 50, 75, 100]) {
+      add('line', {x1: pad.l, x2: W - pad.r, y1: Y(pct), y2: Y(pct), class: pct === 100 ? 'limit' : 'grid'});
+      add('text', {x: pad.l - 10, y: Y(pct) + 4, class: 'axis', 'text-anchor': 'end'}).textContent = pct + '%';
+    }
+    const day = new Date(x0 * 1000); day.setHours(24, 0, 0, 0);
+    for (let at = day.getTime() / 1000; at < x1; at += 86400) {
+      add('line', {x1: X(at), x2: X(at), y1: pad.t, y2: H - pad.b, class: 'grid'});
+      add('text', {x: X(at + 43200), y: H - 10, class: 'axis', 'text-anchor': 'middle'}).textContent =
+        new Date(at * 1000).toLocaleDateString('en-GB', {weekday: 'short', day: 'numeric'});
+    }
+    add('line', {x1: X(now), x2: X(now), y1: pad.t, y2: H - pad.b, class: 'now'});
+    // Each tool's reset is its deadline: a vertical line in its colour, labelled at the top.
+    const resetMarks = [];
+    for (const tool of tools) {
+      const f = forecast[tool], g = add('g', {class: 'series', 'data-tool': tool});
+      add('line', {x1: X(f.resets_at), x2: X(f.resets_at), y1: pad.t, y2: H - pad.b, class: 'reset'}, g);
+      resetMarks.push({tool, f});
+    }
+    add('text', {x: X(now), y: pad.t - 3, class: 'axis', 'text-anchor': 'middle'}).textContent = 'now';
+    const labels = [];
+    for (const tool of tools) {
+      const f = forecast[tool], g = add('g', {class: 'series', 'data-tool': tool});
+      const total = workHours(f.start, f.resets_at);
+      add('path', {d: workBreaks(f.start, f.resets_at).map((t, i) => `${i ? 'L' : 'M'} ${X(t)} ${Y(100 * workHours(f.start, t) / total)}`).join(' '), class: 'even'}, g);
+      const pts = f.points.filter(([at]) => at >= f.start);
+      if (pts.length) add('path', {d: `M ${X(f.start)} ${Y(0)} L ${X(pts[0][0])} ${Y(pts[0][1])}`, class: 'assumed'}, g);
+      add('path', {d: pts.map(([at, pct], i) => `${i ? 'L' : 'M'} ${X(at)} ${Y(pct)}`).join(' '), class: 'actual'}, g);
+      if (Number.isFinite(f.pace_per_day)) {
+        const endAt = Number.isFinite(f.hits_100_at) ? f.hits_100_at : f.resets_at;
+        const endPct = Number.isFinite(f.hits_100_at) ? 100 : f.projected_at_reset;
+        add('path', {d: workBreaks(now, endAt).map((t, i) => `${i ? 'L' : 'M'} ${X(t)} ${Y(Math.min(100, f.used_percent + f.rate * workHours(now, t)))}`).join(' '), class: 'projected'}, g);
+        let markAt = endAt, markText = Number.isFinite(f.hits_100_at) ? `100% ${when(f.hits_100_at)}` : `${Math.round(endPct)}% at reset`;
+        if (Number.isFinite(f.hits_100_at) && f.cap > 100) {
+          // After the limit, Codex runs on credits: a thick line along 100% until they run out or the week resets.
+          markAt = Number.isFinite(f.credits_out_at) ? f.credits_out_at : f.resets_at;
+          add('line', {x1: X(f.hits_100_at), x2: X(markAt), y1: Y(100), y2: Y(100), class: 'credits'}, g);
+          markText = Number.isFinite(f.credits_out_at) ? `credits out ${when(f.credits_out_at)}` : 'credits to reset';
+        }
+        add('circle', {cx: X(markAt), cy: Y(endPct), r: 4, class: 'end'}, g);
+        labels.push({tool, x: X(markAt) + 10, y: Y(endPct) + 4, text: markText});
+      }
+      add('circle', {cx: X(now), cy: Y(f.used_percent), r: 4, class: 'dot'}, g);
+      labels.push({tool, x: X(now) - 10, y: Y(f.used_percent) - 10, anchor: 'end', text: `${toolName(tool)} ${Math.round(f.used_percent)}%`});
+    }
+    // Labels that would overlap move apart vertically.
+    labels.sort((a, b) => a.y - b.y);
+    for (let i = 1; i < labels.length; i++) {
+      const prev = labels[i - 1], cur = labels[i];
+      if (Math.abs(prev.x - cur.x) < 140 && cur.y - prev.y < 15) cur.y = prev.y + 15;
+    }
+    for (const l of labels) add('text', {x: l.x, y: l.y, class: 'label', 'data-tool': l.tool, 'text-anchor': l.anchor || 'start'}).textContent = l.text;
+    const cross = add('line', {y1: pad.t, y2: H - pad.b, class: 'cross', visibility: 'hidden'});
+    const hit = add('rect', {x: pad.l, y: pad.t, width: W - pad.l - pad.r, height: H - pad.t - pad.b, class: 'hit'});
+    const valueAt = (f, at) => {
+      if (at < f.start || at > f.resets_at) return null;
+      if (at <= now) {
+        const pts = [[f.start, 0], ...f.points.filter(([t]) => t >= f.start)];
+        let v = pts[0][1];
+        for (const [t, pct] of pts) if (t <= at) v = pct;
+        return {pct: v, kind: 'used'};
+      }
+      if (!Number.isFinite(f.rate)) return null;
+      return {pct: Math.min(100, f.used_percent + f.rate * workHours(now, at)), kind: 'forecast'};
+    };
+    hit.addEventListener('pointermove', event => {
+      const box = svg.getBoundingClientRect(), px = (event.clientX - box.left) * W / box.width;
+      const at = x0 + (px - pad.l) / (W - pad.l - pad.r) * (x1 - x0);
+      cross.setAttribute('x1', px); cross.setAttribute('x2', px); cross.setAttribute('visibility', 'visible');
+      const rows = tools.map(t => [toolName(t), valueAt(forecast[t], at)]).filter(([, v]) => v)
+        .map(([name, v]) => [name, `${Math.round(v.pct)}%${v.kind === 'forecast' ? ' forecast' : ''}`]);
+      fillTip({title: when(at), rows});
+      const w = tipEl.offsetWidth;
+      tipEl.style.left = Math.max(10, Math.min(innerWidth - w - 10, event.clientX + 15)) + 'px';
+      tipEl.style.top = (event.clientY + 15) + 'px';
+    });
+    hit.addEventListener('pointerleave', () => { cross.setAttribute('visibility', 'hidden'); tipEl.hidden = true; });
+    // Reset marks: the tool's icon at the foot of its reset line; details on hover.
+    for (const {tool, f} of modules.branding ? resetMarks : []) {
+      // Round 24px logo, no outline.
+      const mark = add('g', {class: 'reset-mark', 'data-tool': tool, transform: `translate(${X(f.resets_at) - 12} ${H - pad.b - 29})`});
+      const clipId = 'now-reset-clip-' + tool, clip = add('clipPath', {id: clipId}, mark);
+      add('circle', {cx: 12, cy: 12, r: 12}, clip);
+      const use = add('use', {href: '#now-' + tool, x: 0, y: 0, width: 24, height: 24, 'clip-path': `url(#${clipId})`}, mark);
+      use.setAttribute('aria-hidden', 'true');
+      mark.addEventListener('pointerenter', () => {
+        fillTip({title: `${toolName(tool)} resets in ${span(f.resets_at - now)}`,
+          note: new Date(f.resets_at * 1000).toLocaleString('en-GB', {weekday: 'long', hour: '2-digit', minute: '2-digit'})});
+        const r = mark.getBoundingClientRect(), w = tipEl.offsetWidth;
+        tipEl.style.left = Math.max(10, Math.min(innerWidth - w - 10, r.left + r.width / 2 - w / 2)) + 'px';
+        tipEl.style.top = (r.top - tipEl.offsetHeight - 10) + 'px';
+      });
+      mark.addEventListener('pointerleave', () => { tipEl.hidden = true; });
+    }
+    forecastEl.append(svg);
+  }
+  new ResizeObserver(() => { if (forecastData) { forecastKey = ''; renderForecast(forecastData.forecast, forecastData.now, forecastData.share); } }).observe(forecastEl);
+  function retainedCards(agents, now) {
+    const byId = new Map(agents.map(agent => [agent.id, agent]));
+    const finished = agent => agent.completed || ['done', 'crashed'].includes(agent.status)
+      || (!agent.orchestrator && agent.status === 'blocked' && !needsYou(agent));
+    const keep = new Set(agents.filter(agent => !finished(agent) || now - (agent.ended ?? agent.last_at ?? 0) < 1800).map(agent => agent.id));
+    const pending = [...keep];
+    while (pending.length) {
+      const parent = byId.get(pending.pop()).parent_id;
+      if (byId.has(parent) && !keep.has(parent)) { keep.add(parent); pending.push(parent); }
+    }
+    return new Map(agents.filter(agent => keep.has(agent.id)).map(agent => [agent.id, agent]));
+  }
+  function createGroup(project) {
+    const el = node('section', 'now-project'); el.dataset.project = project;
+    const heading = node('h2'), name = node('span', '', project), counts = node('span', 'now-counts');
+    heading.append(name, counts);
+    const items = node('div', 'now-items');
+    const lines = document.createElementNS(svgNS, 'svg');
+    lines.classList.add('now-tree'); lines.setAttribute('aria-hidden', 'true');
+    // Finished workers sink under a small heading, so the owner sees who left the work.
+    // One click on the heading hides the list, the next shows it; remembered per project in this browser.
+    const finished = node('div', 'now-finished'), finishedItems = node('div', 'now-items');
+    const title = node('h3', 'now-finished-title'), finishedCount = node('span', 'now-finished-count');
+    title.append(node('span', '', 'Finished'), finishedCount);
+    title.tabIndex = 0; title.setAttribute('role', 'button');
+    const key = 'now-finished-collapsed:' + project;
+    const setOpen = open => {
+      finishedItems.hidden = !open; title.setAttribute('aria-expanded', String(open));
+      try { if (open) localStorage.removeItem(key); else localStorage.setItem(key, '1'); } catch {}
+      requestAnimationFrame(drawTrees);
+    };
+    let collapsed = false;
+    try { collapsed = localStorage.getItem(key) === '1'; } catch {}
+    finishedItems.hidden = collapsed; title.setAttribute('aria-expanded', String(!collapsed));
+    title.addEventListener('click', () => setOpen(finishedItems.hidden));
+    title.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setOpen(finishedItems.hidden); }
+    });
+    finished.append(title, finishedItems); finished.hidden = true;
+    el.append(heading, lines, items, finished); board.append(el);
+    const group = {el, counts, items, lines, finished, finishedItems, finishedCount, cards: []}; groups.set(project, group);
+    return group;
+  }
+  function createCard(agent, group) {
+    const el = node('article', 'now-card'); el.dataset.agentId = agent.id;
+    const top = node('div', 'now-identity');
+    if (modules.branding) {
+      const icon = document.createElementNS(svgNS, 'svg'), use = document.createElementNS(svgNS, 'use');
+      icon.setAttribute('aria-hidden', 'true'); use.setAttribute('href', '#now-' + agent.kind); icon.append(use); top.append(icon);
+    }
+    const who = node('span', 'now-who'), model = node('span', 'now-model'); top.append(who, model);
+    const task = node('a', 'now-task');
+    const status = node('div', 'now-status'), dot = node('span', 'now-dot'), action = node('span', 'now-action');
+    status.append(dot, action);
+    const time = node('p', 'now-time'), details = node('div', 'now-details'), footer = node('div', 'now-footer');
+    const context = node('span', 'now-context'), percent = node('span');
+    context.hidden = true; context.setAttribute('role', 'img');
+    const ring = document.createElementNS(svgNS, 'svg');
+    ring.setAttribute('viewBox', '0 0 16 16'); ring.setAttribute('aria-hidden', 'true');
+    const circle = className => {
+      const el = document.createElementNS(svgNS, 'circle'); el.setAttribute('class', className);
+      el.setAttribute('cx', '8'); el.setAttribute('cy', '8'); el.setAttribute('r', '6.5');
+      return el;
+    };
+    const fill = circle('now-context-fill');
+    fill.setAttribute('pathLength', '100'); fill.setAttribute('transform', 'rotate(-90 8 8)');
+    ring.append(circle('now-context-track'), fill); context.append(ring, percent);
+    footer.append(status, time, context); details.append(footer);
+    el.append(top, task, details); group.items.append(el);
+    const view = {el, who, model, task, action, time, context, percent, fill, group, depth: 0, agent};
+    cards.set(agent.id, view); group.cards.push(view);
+    return view;
+  }
+  function paintCard(view, agent, now) {
+    view.agent = agent;
+    text(view.who, agent.orchestrator ? 'Orchestrator' : agent.folder);
+    text(view.model, modelLabel(agent)); text(view.task, agent.task);
+    if (modules.codex_chats && agent.kind === 'codex' && agent.thread) view.task.href = '/?codex=' + encodeURIComponent(agent.thread);
+    else view.task.removeAttribute('href');
+    const [word, detail] = statusText(agent);
+    view.action.replaceChildren(node('span', 'now-word', word), ...(detail ? [node('span', 'now-current', detail)] : []));
+    view.time.replaceChildren(...timeLine(agent, now).map(value => node('span', '', value)));
+    const known = Number.isFinite(agent.context_used) && agent.context_used >= 0
+      && Number.isFinite(agent.context_window) && agent.context_window > 0;
+    view.context.hidden = !known;
+    if (known) {
+      const pct = Math.max(0, Math.min(100, agent.context_used / agent.context_window * 100));
+      text(view.percent, Math.round(pct) + '%');
+      view.context.setAttribute('aria-label', `Context window ${Math.round(pct)}% used`);
+      view.context.dataset.level = pct >= 80 ? 'high' : pct >= 50 ? 'mid' : 'low';
+      view.fill.setAttribute('stroke-dasharray', `${pct} 100`);
+    }
+    view.el.classList.toggle('need', needsYou(agent));
+    view.el.classList.toggle('run', agent.status === 'working');
+    view.el.classList.toggle('done', agent.status === 'done' || agent.completed === true);
+    view.el.dataset.status = agent.status;
+  }
+  function drawTrees() {
+    for (const group of groups.values()) {
+      const bounds = group.el.getBoundingClientRect(), paths = [];
+      const children = new Map();
+      for (const view of group.cards) {
+        const parent = cards.get(view.el.dataset.parentId);
+        if (!parent || parent.group !== group || !view.depth) continue;
+        if (!children.has(parent)) children.set(parent, []);
+        children.get(parent).push(view);
+      }
+      for (const [parent, kids] of children) {
+        const pb = parent.el.getBoundingClientRect(), x = pb.left - bounds.left + 18;
+        const end = kids.at(-1).el.getBoundingClientRect().top - bounds.top + 20;
+        let d = `M ${x} ${pb.bottom - bounds.top} V ${end - 8}`;
+        for (const kid of kids) {
+          const kb = kid.el.getBoundingClientRect(), y = kb.top - bounds.top + 20;
+          d += ` M ${x} ${y - 8} Q ${x} ${y} ${x + 8} ${y} H ${kb.left - bounds.left}`;
+        }
+        const path = document.createElementNS(svgNS, 'path'); path.setAttribute('d', d); paths.push(path);
+      }
+      group.lines.replaceChildren(...paths);
+    }
+  }
+  function reading() { return overBoard || Boolean(document.getSelection()?.toString()); }
+  function flush() {
+    if (!queued || reading()) return;
+    const data = queued; queued = null;
+    // A new page version on the server reloads the open page, so nobody has to press reload.
+    if (data.build) {
+      if (loadedBuild && loadedBuild !== data.build) { location.reload(); return; }
+      loadedBuild = data.build;
+    }
+    // Existing cards keep their order; newly seen cards append after their parent.
+    // Finished work leaves the board 30 min after it ends; the column header keeps the day's count.
+    const everyone = [...(data.agents || []), ...(data.completed || [])];
+    const incoming = retainedCards(everyone, data.now);
+    // A same-title successor takes its predecessor's place, above existing workers.
+    for (const agent of incoming.values()) {
+      if (!agent.orchestrator || cards.has(agent.id)) continue;
+      const previous = [...cards.values()].find(view => !incoming.has(view.agent.id) && view.agent.orchestrator
+        && view.agent.project === agent.project && view.agent.task === agent.task);
+      if (!previous) continue;
+      cards.delete(previous.agent.id); cards.set(agent.id, previous);
+      previous.agent = agent;
+      previous.el.dataset.agentId = agent.id;
+    }
+    const visiting = new Set();
+    function append(agent) {
+      if (cards.has(agent.id) || visiting.has(agent.id)) return;
+      visiting.add(agent.id);
+      const parent = incoming.get(agent.parent_id);
+      if (parent && !cards.has(parent.id)) append(parent);
+      const group = groups.get(agent.project) || createGroup(agent.project);
+      createCard(agent, group); visiting.delete(agent.id);
+    }
+    const priority = project => { const i = projectOrder.indexOf(project); return i < 0 ? projectOrder.length : i; };
+    for (const agent of [...incoming.values()].sort((a, b) => priority(a.project) - priority(b.project))) append(agent);
+    // Cards the server no longer reports (archived chat, finished before today) leave the board.
+    for (const [id, view] of cards) {
+      if (incoming.has(id)) continue;
+      view.el.remove(); cards.delete(id);
+      for (const group of groups.values()) group.cards = group.cards.filter(v => v !== view);
+    }
+    // A finished worker stays in the tree while something under it still works.
+    const ended = agent => !agent.orchestrator && (agent.completed === true || ['done', 'crashed'].includes(agent.status));
+    const holding = new Set();
+    for (const agent of incoming.values()) {
+      if (ended(agent)) continue;
+      for (let id = agent.parent_id; incoming.has(id) && !holding.has(id); id = incoming.get(id).parent_id) holding.add(id);
+    }
+    const placed = new Set();
+    function place(agent) {
+      if (placed.has(agent.id)) return;
+      placed.add(agent.id);
+      const parent = incoming.get(agent.parent_id);
+      if (parent) place(parent);
+      const view = cards.get(agent.id), group = groups.get(agent.project) || createGroup(agent.project);
+      if (view.group !== group) {
+        view.group.cards = view.group.cards.filter(card => card !== view);
+        view.group = group; group.cards.push(view); group.items.append(view.el);
+      }
+      const finished = ended(agent) && !holding.has(agent.id);
+      const list = finished ? group.finishedItems : group.items;
+      if (view.el.parentNode !== list) {
+        if (finished) list.prepend(view.el); else list.append(view.el);
+      }
+      // A live child always sits below its parent, never above it.
+      const parentView = parent && cards.get(parent.id);
+      if (!finished && parentView && parentView.el.parentNode === list
+          && (parentView.el.compareDocumentPosition(view.el) & Node.DOCUMENT_POSITION_PRECEDING)) parentView.el.after(view.el);
+      view.depth = finished ? 0 : parent && cards.get(parent.id).group === group ? Math.min(cards.get(parent.id).depth + 1, 2) : 0;
+      view.el.dataset.parentId = agent.parent_id || '';
+      view.el.style.marginInlineStart = view.depth ? `${view.depth * 30}px` : '';
+      paintCard(view, agent, data.now);
+    }
+    for (const agent of incoming.values()) place(agent);
+    for (const [project, group] of groups) if (!group.cards.length) { group.el.remove(); groups.delete(project); }
+    for (const group of groups.values()) {
+      const count = group.finishedItems.children.length;
+      group.finished.hidden = !count; text(group.finishedCount, String(count));
+    }
+    const counts = agents => ({running: agents.filter(a => a.status === 'working').length,
+      needs: agents.filter(needsYou).length,
+      done: agents.filter(a => (a.completed || a.status === 'done') && sameDay(a.ended ?? a.last_at, data.now)).length});
+    const total = counts(everyone);
+    burnData = modules.burn_rate ? data.burn || {} : {}; renderLimits(data); renderForecast(data.forecast, data.now, workShare(everyone, data.now));
+    summary.replaceChildren();
+    for (const [value, label] of [[total.running, ' running'], [total.needs, ' needs you'], [total.done, ' done today']]) {
+      const item = node('span', 'now-summary-item');
+      item.append(node('b', '', String(value)), label); summary.append(item);
+    }
+    for (const [project, group] of groups) {
+      const c = counts(everyone.filter(a => a.project === project));
+      group.el.classList.toggle('quiet', !c.running);
+      group.counts.replaceChildren(...[c.needs ? `${c.needs} needs you` : '', c.running ? `${c.running} running` : '',
+        c.done ? `${c.done} done` : ''].filter(Boolean).map(value => node('span', '', value)));
+    }
+    error.hidden = true; drawTrees();
+  }
+  board.addEventListener('pointerenter', () => { overBoard = true; });
+  board.addEventListener('pointerleave', () => { overBoard = false; flush(); });
+  document.addEventListener('selectionchange', flush);
+  new ResizeObserver(drawTrees).observe(board);
+  document.fonts.ready.then(drawTrees);
+  return {configure(config) { modules = config.modules || {}; projectOrder = config.project_order || [];
+    WORK = config.work_hours || [9, 21]; WORK_DAY = WORK[1] - WORK[0]; },
+    render(data) { queued = data; flush(); }, error() { text(error, 'Source unavailable. Reconnecting…'); error.hidden = false; }};
+};
