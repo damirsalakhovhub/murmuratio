@@ -1,0 +1,34 @@
+name: Bug report
+description: Report a problem with Murmuratio
+body:
+  - type: textarea
+    id: versions
+    attributes:
+      label: Versions
+      description: Murmuratio, macOS, Python, browser, and Claude Code or Codex versions as applicable.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Sanitized doctor output
+      description: Optional. Run `murmuratio doctor` and remove personal paths, identifiers, and secrets before sharing. Never include raw transcripts or prompts.
+      render: text

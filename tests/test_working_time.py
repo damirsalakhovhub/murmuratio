@@ -53,7 +53,7 @@ class WorkingTimeTests(unittest.TestCase):
     def test_claude_excludes_idle_gap_and_adds_current_turn(self):
         self.append(self.claude, self.message('user', self.now - 40000),
                     self.message('assistant', self.now - 39940, stop_reason='end_turn'))
-        self.assertEqual(self.agent()['seconds'], 60)
+        self.assertEqual(self.source.state()['agents'], [], 'S5: an old completed turn has expired')
         self.append(self.claude, self.message('user', self.now - 20),
                     self.message('assistant', self.now - 10, stop_reason='tool_use'))
         self.assertEqual(self.agent()['seconds'], 80)
@@ -61,8 +61,13 @@ class WorkingTimeTests(unittest.TestCase):
         self.assertEqual(self.agent()['seconds'], 90)
         self.append(self.claude, self.message('assistant', self.now - 5, stop_reason='end_turn'))
         self.assertEqual(self.agent()['seconds'], 85)
-        self.now += 3600
+        self.now += 300
         self.assertEqual(self.agent()['seconds'], 85)
+        self.now += 1800
+        self.assertEqual(self.source.state()['agents'], [], 'S5: completion expires without losing turn totals')
+        self.append(self.claude, self.message('user', self.now - 5),
+                    self.message('assistant', self.now, stop_reason='end_turn'))
+        self.assertEqual(self.agent()['seconds'], 90)
 
     def test_claude_missing_completion_closes_at_previous_last_event(self):
         self.append(self.claude, self.message('user', self.now - 40000),
@@ -79,7 +84,7 @@ class WorkingTimeTests(unittest.TestCase):
                     self.message('assistant', self.now - 60, stop_reason='end_turn'))
         self.assertEqual(self.agent()['seconds'], 40)
 
-    def test_claude_stalled_approval_stops_at_last_event(self):
+    def test_quiet_claude_turn_remains_working(self):
         self.append(self.claude, self.message('user', self.now - 40000),
                     self.message('assistant', self.now - 39940, stop_reason='end_turn'),
                     self.message('user', self.now - 2000),
@@ -88,9 +93,10 @@ class WorkingTimeTests(unittest.TestCase):
         meta.parent.mkdir(parents=True)
         meta.write_text(json.dumps(dict(cliSessionId='chat')))
         os.utime(self.claude, (self.now - 1900, self.now - 1900))
-        self.assertEqual((self.agent()['status'], self.agent()['seconds']), ('blocked', 160))
+        self.assertEqual((self.agent()['status'], self.agent()['seconds']), ('working', 2060))
+        self.assertTrue(self.agent()['quiet'])
         self.now += 300
-        self.assertEqual(self.agent()['seconds'], 160)
+        self.assertEqual(self.agent()['seconds'], 2360)
 
     def test_codex_excludes_idle_gap_and_freezes_completed_turns(self):
         self.rollout(self.event('task_started', self.now - 39999),

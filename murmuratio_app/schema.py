@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from typing import Generic, Literal, TypedDict, TypeVar
 
 Confidence = Literal['observed', 'inferred']
-SourceStatus = Literal['available', 'unavailable', 'unsupported', 'stale']
-SessionStatus = Literal['working', 'hung', 'waiting', 'idle', 'done', 'blocked', 'crashed']
+SourceStatus = Literal['available', 'absent', 'unavailable', 'unsupported', 'stale']
+SessionStatus = Literal['working', 'hung', 'waiting', 'idle', 'done', 'blocked', 'crashed', 'unknown']
 
 
 class Parent(TypedDict, total=False):
@@ -50,6 +50,7 @@ class Session(Parent, Action, SessionTimes, Context, total=False):
     cwd: str
     folder: str
     completed: bool
+    quiet: bool
     app_session: str | None
     thread: str | None
     codex_role: Literal['worker', 'chat']
@@ -140,6 +141,7 @@ class AdapterResult(Generic[T]):
     status: SourceStatus
     observations: list[Observation[T]]
     age_seconds: float | None = None
+    reason: str | None = None
 
     def values(self) -> list[T]:
         return [observation.value for observation in self.observations]

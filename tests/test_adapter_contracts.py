@@ -121,7 +121,7 @@ class AdapterContractTests(unittest.TestCase):
                 self.config = Config.load(self.home)
                 self.source = NowSource(self.home, config=self.config, clock=lambda: NOW, alive=lambda pid: pid == 7)
                 result = self.setup_adapter(kind, 'missing')()
-                self.assertEqual(result.status, 'unavailable')
+                self.assertEqual(result.status, 'unavailable' if kind == 'codex_sessions' else 'absent')
                 self.assertEqual(result.observations, [])
 
     def test_malformed_source_is_unsupported(self):
@@ -172,6 +172,7 @@ class AdapterContractTests(unittest.TestCase):
             self.assertTrue(ready, 'fixture usage scans completed')
             actual = self.source.state()
         expected = json.loads((FIXTURES / 'expected-board.json').read_text())
+        expected['local_day'] = actual['local_day']  # Calendar bounds depend on the host timezone.
         self.assertEqual(actual, expected)
 
     def test_partial_malformed_rollout_keeps_valid_events(self):

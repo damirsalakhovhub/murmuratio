@@ -1,7 +1,7 @@
 """Optional adapter for local Codex wrapper run files."""
 import json
 from pathlib import Path
-from murmuratio_app.adapters.base import Adapter, UnavailableSource
+from murmuratio_app.adapters.base import Adapter
 from murmuratio_app.adapters.activity import working_seconds
 from murmuratio_app.adapters.parsing import consume_codex
 from murmuratio_app.adapters.shared import CODEX_DEAD_SECONDS, codex_status
@@ -20,6 +20,52 @@ class CodexWrapperAdapter(Adapter):
         self.runner = runner or self.run
         self.has_rollout = has_rollout
 
+    def titles(self):
+        """Thread id to the newest wrapper run title, the same task name the Board card shows."""
+        cache = getattr(self, '_title_cache', {})
+        fresh, found = {}, {}
+        try:
+            paths = list(self.root.glob('*.json'))
+        except OSError:
+            return {}
+        for path in paths:
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            entry = cache.get(path)
+            if not entry or entry[0] != mtime:
+                entry = (mtime, *self._title_of(path))
+            fresh[path] = entry
+            _, thread, title, started = entry
+            if thread and title and (thread not in found or started >= found[thread][1]):
+                found[thread] = (title, started)
+        self._title_cache = fresh
+        return {thread: title for thread, (title, _) in found.items()}
+
+    @staticmethod
+    def _title_of(path):
+        try:
+            run = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return None, '', 0
+        if not isinstance(run, dict):
+            return None, '', 0
+        thread = run.get('thread') if isinstance(run.get('thread'), str) else None
+        if not thread and run.get('mode') == 'resume' and isinstance(run.get('target'), str):
+            thread = run['target']
+        if not thread and isinstance(run.get('events'), str) and run['events']:
+            try:
+                with open(run['events'], encoding='utf-8', errors='replace') as handle:
+                    first = json.loads(handle.readline() or '{}')
+                if isinstance(first, dict) and first.get('type') == 'thread.started' and isinstance(first.get('thread_id'), str):
+                    thread = first['thread_id']
+            except (OSError, ValueError):
+                pass
+        started = timestamp(run.get('started')) or 0
+        title = one_line(run.get('title')).encode('utf-8', 'ignore').decode('utf-8')
+        return thread, title[:240], started
+
     def run(self, path, now, seen=None):
         run = json.loads(path.read_text())
         if not isinstance(run, dict) or run.get('status') not in ('running', 'done'):
@@ -27,7 +73,7 @@ class CodexWrapperAdapter(Adapter):
         started, ended = timestamp(run.get('started')), timestamp(run.get('ended'))
         finished_at = ended or path.stat().st_mtime
         run_id = one_line(run.get('run_id')) or path.stem
-        old = run['status'] == 'done' and not active_today(finished_at, now)
+        old = run['status'] == 'done' and not active_today(finished_at, now) and now - finished_at >= 1800
         if old and now - finished_at > 86400 and not self.has_rollout(run.get('thread'), run_id):
             return None
         data, last_at = {}, None
@@ -37,8 +83,12 @@ class CodexWrapperAdapter(Adapter):
                 data, last_at = self.summary(events, consume_codex)
                 if self.summary_cache[events].malformed:
                     self.unsupported()
-            except OSError:
-                self.unavailable()
+            except FileNotFoundError:
+                # Temporary event logs may be removed after the run. The saved
+                # wrapper metadata is still a usable observation.
+                pass
+            except OSError as exc:
+                self.unavailable(exc)
         thread = run.get('thread') or data.get('thread')
         if not isinstance(thread, str):
             thread = None
@@ -82,11 +132,11 @@ class CodexWrapperAdapter(Adapter):
                     _run_id=run_id)
 
     def collect(self, now, seen):
-        if not self.root.is_dir():
-            raise UnavailableSource()
-        for path in self.root.glob('*.json'):
+        found = False
+        for path in self.files('*.json'):
             try:
                 raw = json.loads(path.read_text())
+                found = True
                 if not isinstance(raw, dict) or raw.get('status') not in ('running', 'done'):
                     self.unsupported()
                     continue
@@ -95,7 +145,11 @@ class CodexWrapperAdapter(Adapter):
                     yield self.observation(agent, agent.get('last_at') or path.stat().st_mtime, 'inferred')
                 if isinstance(raw.get('events'), str):
                     seen.add(Path(raw['events']))
-            except OSError:
-                self.unavailable()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                self.unavailable(exc)
             except (ValueError, TypeError, OverflowError, AttributeError):
                 self.unsupported()
+        if not found and self.status == 'available':
+            self.status = 'absent'

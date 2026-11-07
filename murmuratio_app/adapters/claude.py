@@ -1,7 +1,7 @@
 """Adapters for Claude Desktop metadata and Claude Code transcripts."""
 import json
 from pathlib import Path
-from murmuratio_app.adapters.base import Adapter, UnavailableSource
+from murmuratio_app.adapters.base import Adapter
 from murmuratio_app.adapters.activity import working_seconds
 from murmuratio_app.adapters.parsing import consume_claude, consume_claude_sidechain
 from murmuratio_app.adapters.shared import claude_context_window, claude_label, claude_status
@@ -18,10 +18,8 @@ class ClaudeDesktopAdapter(Adapter):
         self.cache = {}
 
     def collect(self):
-        if not self.root.is_dir():
-            raise UnavailableSource()
         seen = set()
-        for path in self.root.glob('*/*/local_*.json'):
+        for path in self.files('*/*/local_*.json'):
             seen.add(path)
             try:
                 st = path.stat()
@@ -58,15 +56,11 @@ class ClaudeSessionsAdapter(Adapter):
         self.summary, self.cache, self.project = summary, cache, project
 
     def collect(self, now, desktop, seen, active_codex=None):
-        if not self.root.is_dir():
-            raise UnavailableSource()
         sessions = {}
-        for path in self.root.glob('*/*.jsonl'):
+        for path in self.files('*/*.jsonl'):
             try:
                 modified = path.stat().st_mtime
                 meta = desktop.get(path.stem, {})
-                if not meta and now - modified > 259200:
-                    continue
                 if meta.get('archived') or meta.get('scheduled_task_id') is not None:
                     continue
                 seen.add(path)
@@ -74,14 +68,12 @@ class ClaudeSessionsAdapter(Adapter):
                 cached = self.cache.get(path)
                 if cached and (cached.malformed or cached.record_types and not cached.record_types.intersection({'user', 'assistant'})):
                     self.unsupported()
+                if not data:
+                    continue
                 parent_session = meta.get('parent_session', '')
                 spawned = bool(parent_session)
-                status = claude_status(modified, data.get('last_turn'), now, spawned)
-                if not status and meta and data.get('last_turn') == 'end_turn':
-                    status = 'done' if spawned else 'waiting'
-                approval = not status and meta and data.get('last_turn') == 'tool_use' and 600 < now - modified < 86400
-                if approval:
-                    status = 'blocked'
+                activity = min(modified, data.get('last_at') or modified)
+                status = claude_status(activity, data.get('last_turn'), now, spawned or not meta)
                 pending = not status and bool(active_codex)
                 if pending:
                     status = 'waiting'
@@ -90,26 +82,30 @@ class ClaudeSessionsAdapter(Adapter):
                 cwd = data.get('cwd') or meta.get('cwd') or ''
                 started = data.get('started')
                 model = data.get('model') or one_line(meta.get('model'))
+                finished_at = min(activity, data.get('waiting_since') or activity)
                 session = dict(id='claude:' + path.stem, kind='claude', who=claude_label(model),
                                model=model, cwd=cwd, folder=Path(cwd).name or '—', project=self.project(cwd),
                                task=one_line(meta.get('title')) or data.get('first_user') or 'Untitled',
                                title_source='desktop' if one_line(meta.get('title')) else 'first_user',
                                status=status, last_action=data.get('last_action', ''),
-                               current_action='waiting for approval' if approval else data.get('current_action', ''), started=started,
-                               turn_started=data.get('turn_started'), ended=data.get('last_at') if status == 'done' else None,
-                               waiting_since=data.get('waiting_since'), app_session=meta.get('app_session'),
+                               current_action=data.get('current_action', ''), started=started,
+                               turn_started=data.get('turn_started'), ended=finished_at if status == 'done' else None,
+                               waiting_since=finished_at if data.get('waiting_since') is not None else None,
+                               app_session=meta.get('app_session'),
                                parent_session=parent_session,
-                               last_at=data.get('last_at') or modified,
+                               last_at=activity,
                                seconds=working_seconds(data, now, status, started, data.get('last_at')),
                                context_tokens=data.get('context_tokens'), context_used=data.get('context_tokens'),
                                context_window=claude_context_window(data, model),
                                _codex_launches=list(data.get('_codex_launches', [])), _codex_pending=pending)
+                if status == 'working' and now - activity > 120:
+                    session['quiet'] = True
                 sessions[path.stem] = session
             except OSError:
                 self.unavailable()
             except (ValueError, TypeError, OverflowError, AttributeError):
                 self.unsupported()
-        for path in self.root.glob('*/*/subagents/*.jsonl'):
+        for path in self.files('*/*/subagents/*.jsonl'):
             parent = sessions.get(path.parent.parent.name)
             if not parent:
                 continue

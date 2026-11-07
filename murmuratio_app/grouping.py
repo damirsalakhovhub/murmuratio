@@ -5,17 +5,24 @@ from murmuratio_app.common import active_today
 from murmuratio_app.schema import DesktopSession, Session
 
 def retain_agents(agents: list[Session], now: float) -> list[Session]:
-    """Keep today's activity, running work and unarchived orchestrators, with ancestors."""
+    """Keep live work, waiting Desktop roots and recent workers, with active ancestors."""
     by_id = {agent['id']: agent for agent in agents}
     keep = {agent['id'] for agent in agents if agent.get('board_source') == 'codex_rollout'
             or agent['status'] in ('working', 'hung')
             or (agent['status'] == 'blocked' and agent.get('current_action') == 'waiting for approval')
-            or agent.get('orchestrator') or active_today(agent.get('last_at'), now)}
-    pending = list(keep)
+            or (agent.get('kind') == 'claude' and agent.get('app_session')
+                and agent.get('orchestrator') and agent['status'] == 'waiting')
+            or (agent.get('kind') != 'claude' and active_today(agent.get('last_at'), now))
+            or now - (agent.get('ended') or agent.get('waiting_since') or agent.get('last_at') or 0) < 1800}
+    pending = [agent['id'] for agent in agents if agent['id'] in keep and (
+        agent['status'] in ('working', 'hung') or
+        agent['status'] == 'blocked' and agent.get('current_action') == 'waiting for approval')]
+    visited = set(pending)
     while pending:
         parent = by_id[pending.pop()].get('parent_id')
-        if parent in by_id and parent not in keep:
+        if parent in by_id and parent not in visited:
             keep.add(parent)
+            visited.add(parent)
             pending.append(parent)
     return [agent for agent in agents if agent['id'] in keep]
 
@@ -90,8 +97,9 @@ def merge_codex_sources(wrappers, rollouts):
     """Unify observations only when a recorded thread or run identifier agrees."""
     groups = []
     for agent in wrappers + rollouts:
-        keys = {value for value in (agent.get('thread'), agent.get('_run_id'),
-                                    agent['id'].removeprefix('codex:')) if isinstance(value, str) and value}
+        keys = {(namespace, value) for namespace, value in (
+            ('thread', agent.get('thread')), ('run', agent.get('_run_id')))
+            if isinstance(value, str) and value}
         matching = [group for group in groups if group['keys'] & keys]
         if not matching:
             matching = [{'keys': set(), 'items': []}]
@@ -120,6 +128,7 @@ def merge_codex_sources(wrappers, rollouts):
             if agent.get('_dead_expired') and not native.get('completed'):
                 agent['completed'], agent['ended'] = False, None
             agent['_rollout'], agent['_turns'] = True, native.get('_turns', [])
+            agent['_parent_thread'] = native.get('_parent_thread')
             agent['board_source'] = 'codex_rollout'
             for key in ('thread', 'model', 'cwd', 'folder', 'project', 'task', 'context_used',
                         'context_tokens', 'context_window', 'turn_started'):
@@ -158,7 +167,17 @@ def codex_launch_matches(agent, call, exact=False):
 def link_codex(agents, aliases, launches):
     codex = [agent for agent in agents if agent['kind'] == 'codex']
     calls = [(aliases.get(alias), call) for alias, call in launches if aliases.get(alias)]
+    threads = {agent.get('thread'): agent for agent in codex if agent.get('thread')}
     for agent in codex:
+        native_parent = agent.get('_parent_thread')
+        if native_parent:
+            parent = threads.get(native_parent)
+            agent['parent_id'] = parent['id'] if parent is not agent and parent else None
+            if agent['parent_id']:
+                agent['link'] = 'exact'
+            else:
+                agent['_link_ambiguous'] = True
+            continue
         parent = aliases.get(agent.get('parent_session')) or aliases.get(agent.get('parent_app_session'))
         if parent:
             agent['parent_id'], agent['link'] = parent['id'], 'exact'
@@ -182,11 +201,23 @@ def link_codex(agents, aliases, launches):
             continue
         parent = calls[index][0]
         agent['parent_id'], agent['link'] = parent['id'], 'inferred'
+    # Do not let malformed native parent cycles hide every card.
+    by_id = {agent['id']: agent for agent in codex}
+    for agent in codex:
+        seen, current = {agent['id']}, agent
+        while current.get('parent_id') in by_id:
+            if current['parent_id'] in seen:
+                agent['parent_id'] = None
+                agent.pop('link', None)
+                break
+            seen.add(current['parent_id'])
+            current = by_id[current['parent_id']]
     for agent in codex:
         agent['orchestrator'] = False
         if agent.get('parent_id'):
             mark_codex_worker(agent)
-        parent = next((parent for parent in aliases.values() if parent['id'] == agent.get('parent_id')), None)
+        parent = by_id.get(agent.get('parent_id')) or next(
+            (parent for parent in aliases.values() if parent['id'] == agent.get('parent_id')), None)
         if parent:
             agent['project'] = parent['project']
 
@@ -227,7 +258,8 @@ def link_parents(agents: list[Session], desktop: dict[str, DesktopSession], cloc
     for agent in claude:
         # A chat whose starter is known but not on the board is a root only if it is an orchestrator;
         # other orphans (a starter that is hidden or archived) join their project's orchestrator below.
-        agent['orchestrator'] = not agent['parent_id'] and (not agent['parent_session'] or (
+        # A standalone CLI transcript does not establish an orchestrator role.
+        agent['orchestrator'] = bool(agent.get('app_session')) and not agent['parent_id'] and (not agent['parent_session'] or (
             agent['parent_session'] in known_parents and 'orchestrator' in agent['task'].lower()))
         if agent['orchestrator']:
             roots.setdefault(agent['project'], []).append(agent)
@@ -256,6 +288,6 @@ def link_parents(agents: list[Session], desktop: dict[str, DesktopSession], cloc
         if agent['orchestrator'] and agent['status'] == 'waiting' and agent['id'] in working_ancestors:
             agent['status'] = 'idle'
     for agent in agents:
-        for key in ('_codex_launches', '_codex_pending', '_link_ambiguous', '_wrapper', '_pid_known', '_dead_expired', '_rollout', '_run_id', '_turns', '_stopped_seconds'):
+        for key in ('_codex_launches', '_codex_pending', '_link_ambiguous', '_wrapper', '_pid_known', '_dead_expired', '_rollout', '_run_id', '_turns', '_stopped_seconds', '_parent_thread'):
             agent.pop(key, None)
     return agents

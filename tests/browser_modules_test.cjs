@@ -56,6 +56,7 @@ let browser;
   assert(['forecast', 'routing', 'burn', 'credits'].every(key => !(key in first)));
   assert.equal(await demo.$$eval('.now-card.need', es => es.length), 1, 'worker approval requires attention');
   assert.equal(await demo.$eval('#now-summary', e => e.textContent.includes('1 needs attention')), true);
+  fs.mkdirSync(path.join(root, '.inspector-data'), {recursive: true});
   await demo.screenshot({path: path.join(root, '.inspector-data/opensource-demo.png'), fullPage: true});
   await demo.close();
   const emptyBurn = await browser.newPage();

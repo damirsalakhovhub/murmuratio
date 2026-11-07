@@ -35,7 +35,7 @@ class InspectorTests(unittest.TestCase):
         return result
 
     def test_static_assets_and_response_headers(self):
-        for path in ('/', '/app.js', '/now.js', '/panels.js', '/style.css'):
+        for path in ('/', '/app.js', '/now.js', '/panels.js', '/activity.js', '/style.css'):
             with self.subTest(path=path):
                 code, body, headers = self.request(path)
                 self.assertEqual(code, 200)
@@ -98,7 +98,7 @@ class InspectorTests(unittest.TestCase):
 
     def test_cross_site_api_and_assets_stay_forbidden(self):
         for path in ('/api/now', '/api/config', '/api/codex/state', '/app.js',
-                     '/now.js', '/panels.js', '/style.css', '/index.html', '/missing'):
+                     '/now.js', '/panels.js', '/activity.js', '/style.css', '/index.html', '/missing'):
             for mode, dest in (('cors', 'empty'), ('navigate', 'document')):
                 with self.subTest(path=path, mode=mode, dest=dest):
                     headers = {**CROSS_SITE_NAVIGATION, 'Sec-Fetch-Mode': mode,

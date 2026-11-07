@@ -1,0 +1,6 @@
+{"type":"user","timestamp":"2026-11-05T16:13:00.000Z","sessionId":"synthetic-oneshot","uuid":"synthetic-prompt","parentUuid":null,"isSidechain":false,"cwd":"/synthetic/project","message":{"role":"user","content":"Summarize the sample capabilities."}}
+{"type":"attachment","timestamp":"2026-11-05T16:13:00.001Z","sessionId":"synthetic-oneshot","parentUuid":"synthetic-prompt","attachment":{"type":"synthetic"}}
+{"type":"assistant","timestamp":"2026-11-05T16:13:30.000Z","sessionId":"synthetic-oneshot","uuid":"synthetic-thinking","parentUuid":"synthetic-prompt","isSidechain":false,"message":{"id":"synthetic-response","role":"assistant","model":"claude-sonnet-5-5","stop_reason":null,"content":[{"type":"thinking","thinking":"Considering the sample."}]}}
+{"type":"assistant","timestamp":"2026-11-05T16:14:00.000Z","sessionId":"synthetic-oneshot","uuid":"synthetic-answer","parentUuid":"synthetic-thinking","isSidechain":false,"message":{"id":"synthetic-response","role":"assistant","model":"claude-sonnet-5-5","stop_reason":"stop_sequence","stop_sequence":"","content":[{"type":"text","text":"The sample supports inspection."}],"usage":{"input_tokens":10,"output_tokens":6}}}
+{"type":"last-prompt","sessionId":"synthetic-oneshot","lastPrompt":"Summarize the sample capabilities."}
+{"type":"cost-state","sessionId":"synthetic-oneshot","costUSD":0}

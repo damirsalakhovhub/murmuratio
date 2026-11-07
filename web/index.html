@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="/style.css">
   <script src="/panels.js" defer></script>
   <script src="/now.js" defer></script>
+  <script src="/activity.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body class="now-mode">
@@ -16,12 +17,18 @@
     <p id="connection-error" class="error" role="status" hidden></p>
   </header>
   <div class="source-bar">
-  <div class="now-title" lang="en"><h1>Agents</h1><p id="now-summary" class="now-summary"></p></div>
+  <div class="now-title" lang="en"><h1 id="page-title">Agents</h1><p id="now-summary" class="now-summary"></p></div>
   <div class="now-right" lang="en"><p id="now-limits" class="now-limits"></p>
+  <div class="now-nav">
+  <div class="now-tools" id="now-tools">
+    <button id="charts-toggle" class="now-tool" type="button" aria-pressed="true" aria-label="Charts" title="Hide charts" hidden><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 13.5h12M3.5 11 6.5 7l2.5 2.5 4-5"/></svg></button>
+    <button id="columns-toggle" class="now-tool" type="button" aria-expanded="false" aria-controls="columns-menu" aria-haspopup="true" title="Columns"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="2"/><path d="M6 2.5v11M10 2.5v11"/></svg><span id="columns-hidden-count" class="now-tool-count" hidden></span></button>
+    <div id="columns-menu" class="now-menu" role="group" aria-label="Columns" hidden></div>
+  </div>
   <nav class="source-tabs" role="tablist" aria-label="Source">
     <button id="tab-now" class="control button" role="tab" aria-selected="true" aria-controls="now-view" type="button">Board</button>
     <button id="tab-codex" class="control button" role="tab" aria-selected="false" aria-controls="workspace" tabindex="-1" type="button">Codex chats</button>
-  </nav></div>
+  </nav></div></div>
   </div>
   <main id="now-view" class="now-view" role="tabpanel" aria-labelledby="tab-now" lang="en">
     <p id="now-error" role="status" hidden></p>
@@ -30,15 +37,16 @@
   </main>
   <div id="workspace" class="workspace" role="tabpanel" aria-labelledby="tab-codex" hidden>
     <aside class="chats surface surface--2" aria-label="Chats">
+      <button id="chats-drawer" class="chats-drawer" type="button" aria-expanded="false" aria-controls="codex-filters chat-list">All chats</button>
       <div id="codex-filters" class="filter-stack">
-        <label class="filter-stack" for="chat-search"><input id="chat-search" class="control input" type="search" autocomplete="off" placeholder="Find a chat or project" aria-label="Name or project"></label>
+        <label class="filter-stack chat-search-field" for="chat-search"><input id="chat-search" class="control input" type="search" autocomplete="off" placeholder="Find a chat or project" aria-label="Name or project"></label>
         <div class="sidebar-options">
         <label class="checkbox-control"><input id="show-archive" type="checkbox">Archived</label>
         <label class="checkbox-control"><input id="show-agents" type="checkbox">Subagents</label>
+        <label class="checkbox-control hidden-chats-filter"><input id="show-hidden" type="checkbox"><span id="hidden-chats-label">Hidden</span></label>
         </div>
         <p id="chat-count" class="muted" role="status"></p>
       </div>
-      <label class="checkbox-control hidden-chats-filter"><input id="show-hidden" type="checkbox"><span id="hidden-chats-label">Hidden</span></label>
       <nav id="chat-list" aria-label="Codex chats"><button id="more-chats" class="control button" type="button" hidden>More chats</button></nav>
     </aside>
     <div id="sidebar-resizer" role="separator" aria-label="Chat list width" aria-orientation="vertical" aria-controls="chat-list" tabindex="0"></div>
@@ -46,24 +54,30 @@
       <header class="conversation-header">
         <div class="conversation-heading">
           <h2 id="session-title">Select a chat</h2>
+          <p id="session-status" class="session-status" role="status" hidden></p>
+          <div class="session-meta-row">
+            <p id="session-meta" class="session-meta" hidden></p>
+            <button id="reset-context" class="session-action" type="button" hidden>Reset context</button>
+          </div>
         </div>
-        <button id="reset-context" class="control button" type="button" hidden>Reset context</button>
       </header>
       <p id="session-error" class="error" role="alert" hidden></p>
       <section id="reset-result" class="reset-result" aria-live="polite" hidden>
         <div id="reset-result-line"></div>
         <p id="reset-result-note" class="muted"></p>
       </section>
+      <div class="conversation-body">
       <section id="analysis" class="analysis" aria-label="Chat analysis" hidden></section>
       <details id="event-log" class="event-log" open hidden>
-        <summary id="event-log-summary">Chat events</summary>
+        <summary class="event-log-head"><span id="event-log-summary">Activity</span><span id="event-count" class="event-count"></span></summary>
         <div class="event-log-body">
-        <button id="collapse-all" class="control button" type="button" hidden>Collapse all replies</button>
+        <button id="collapse-all" class="control button" type="button" hidden>Collapse all</button>
       <button id="older-events" class="control button" type="button" hidden>Earlier</button>
       <div id="feed" tabindex="0" aria-label="Chat messages and events"></div>
       <button id="new-events" class="control button button--primary" type="button" hidden>New events ↓</button>
         </div>
       </details>
+      </div>
     </main>
   </div>
   <dialog id="reset-dialog" aria-labelledby="reset-title" aria-describedby="reset-description">

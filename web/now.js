@@ -11,17 +11,21 @@ window.createNowView = ({node, text}) => {
   const needsYou = agent => !agent.completed && agent.status === 'blocked' && (agent.orchestrator || agent.current_action === 'waiting for approval');
   let modules = {}, projectOrder = [];
   const svgNS = 'http://www.w3.org/2000/svg';
-  let queued = null, overBoard = false, loadedBuild = '';
+  let queued = null, overBoard = false, loadedBuild = '', dayBounds = null;
+  let disconnected = false, paused = false, pauseTimer = null, sourceIssue = '';
   const clock = at => Number.isFinite(at) ? new Date(at * 1000).toLocaleTimeString('en-GB', {hour: '2-digit', minute: '2-digit'}) : '—';
   const minutes = seconds => `${Math.floor(Math.max(0, seconds || 0) / 60)}′`;
-  const sameDay = (a, b) => Number.isFinite(a) && new Date(a * 1000).toDateString() === new Date(b * 1000).toDateString();
+  const sameDay = (a, b) => Number.isFinite(a) && (dayBounds
+    ? a >= dayBounds.start && a < dayBounds.end
+    : new Date(a * 1000).toDateString() === new Date(b * 1000).toDateString());
   // One format everywhere: when it started and how long it has worked.
   function timeLine(agent, now) {
     if (agent.orchestrator) {
-      return agent.status === 'working' ? [clock(agent.turn_started), minutes(now - agent.turn_started)]
-        : [`Last reply ${clock(agent.waiting_since ?? agent.last_at)}`];
+      return agent.status === 'working' ? (Number.isFinite(agent.turn_started)
+        ? [clock(agent.turn_started), minutes(now - agent.turn_started)] : [clock(agent.turn_started)])
+        : [clock(agent.waiting_since ?? agent.last_at)];
     }
-    return [clock(agent.started), minutes(agent.seconds)];
+    return [clock(agent.started), ...(Number.isFinite(agent.seconds) ? [minutes(agent.seconds)] : [])];
   }
   function modelLabel(agent) {
     if (agent.kind === 'claude') return (agent.who || 'Claude').replace(/^Claude\s*/, '') || 'Claude';
@@ -29,14 +33,14 @@ window.createNowView = ({node, text}) => {
   }
   function statusText(agent) {
     switch (agent.status) {
-      case 'working': return ['Running', agent.current_action];
+      case 'working': return ['Running', agent.quiet ? ['Quiet', agent.current_action].filter(Boolean).join(' ') : agent.current_action];
       case 'waiting': return ['Turn finished'];
       case 'idle': return ['Idle', 'agents working'];
       case 'done': return ['Done'];
       case 'blocked': return ['Blocked', agent.current_action];
       case 'hung': return ['Stalled', 'no events for 10 min'];
       case 'crashed': return ['Stopped', 'process exited'];
-      default: return [''];
+      default: return ['Unknown'];
     }
   }
   function limitState(window, now) {
@@ -140,11 +144,12 @@ window.createNowView = ({node, text}) => {
       for (const [index, window] of windows.entries()) {
         const state = limitState(window, data.now), item = node('span', 'now-gauge');
         item.dataset.tool = kind; item.dataset.level = state.level;
-        item.setAttribute('aria-label', `${kind === 'claude' ? 'Claude' : 'Codex'} ${window.window_minutes >= 10080 ? 'week' : '5h'} ${state.percent}% used`);
+        const stale = data.sources?.[kind + '_limits']?.status === 'stale' || data.sources?.[kind + '_limits']?.stale === true;
+        item.setAttribute('aria-label', `${kind === 'claude' ? 'Claude' : 'Codex'} ${window.window_minutes >= 10080 ? 'week' : '5h'} ${state.percent}% used${stale ? ', stale' : ''}`);
         const label = node('span', 'now-gauge-label');
         const name = kind === 'claude' ? 'Claude' : 'Codex', week = window.window_minutes >= 10080;
         const span = week ? 'week' : Math.round(window.window_minutes / 60) + '-hour';
-        const win = node('span', 'now-gauge-win', week ? 'week' : Math.round(window.window_minutes / 60) + 'h');
+        const win = node('span', 'now-gauge-win', (week ? 'week' : Math.round(window.window_minutes / 60) + 'h') + (stale ? ' stale' : ''));
         tip(win, {title: `${name} ${span} window`, note: week ? 'Usage counts over a rolling week' : `Usage counts over a rolling ${span.replace('-hour', ' hours')}`});
         const resetLine = node('span', 'now-gauge-reset'), reset = node('span', '', state.reset);
         if (Number.isFinite(window.resets_at)) tip(reset, {title: `${name} ${span} reset`, rows: [['In', state.reset],
@@ -313,7 +318,7 @@ window.createNowView = ({node, text}) => {
     return group;
   }
   function rerender() { forecastKey = ''; if (forecastData) renderForecast(forecastData.forecast, forecastData.now, forecastData.share); }
-  const viewSwitch = () => segmented([['forecast', 'Forecast'], ['burn', 'Burn rate']], blockView, 'View', id => {
+  const viewSwitch = () => segmented([['forecast', 'Forecast'], ['burn', narrowChart() ? 'Burn' : 'Burn rate']], blockView, 'View', id => {
     blockView = id; try { localStorage.setItem('now-block-view', id); } catch {}
     rerender();
   });
@@ -330,6 +335,7 @@ window.createNowView = ({node, text}) => {
       rerender();
     });
     period.classList.add('now-burn-period');
+    forecastEl.classList.toggle('narrow', narrowChart());
     top.append(title, period, ...(modules.forecast ? [viewSwitch()] : []));
     // Bins: today's hours, or the days of each tool's week.
     const day0 = new Date(now * 1000); day0.setHours(0, 0, 0, 0);
@@ -361,7 +367,9 @@ window.createNowView = ({node, text}) => {
     head.append(top, bottom);
     forecastEl.replaceChildren(head);
     const charts = node('div', 'now-burn-charts');
-    const W = Math.max(300, (forecastEl.clientWidth - 20 - 20) / 2), H = 500 - 20 - 90 - 10, pad = {l: 40, r: 10, t: 25, b: 30};
+    const narrow = narrowChart();
+    const W = narrow ? Math.max(200, forecastEl.clientWidth - 20) : Math.max(300, (forecastEl.clientWidth - 20 - 20) / 2);
+    const H = narrow ? 200 : 500 - 20 - 90 - 10, pad = {l: 40, r: 10, t: 25, b: 30};
     for (const tool of tools) {
       const {edges, sums} = series[tool];
       const totals = sums.map(s => Object.values(s).reduce((a, b) => a + b, 0));
@@ -412,14 +420,60 @@ window.createNowView = ({node, text}) => {
     if (!tools.length) charts.append(node('p', 'now-burn-note', 'No usage recorded this week yet'));
     forecastEl.append(charts);
   }
+  // Charts can be put away from the header; the choice stays in this browser.
+  const chartsToggle = document.getElementById('charts-toggle');
+  let chartsOn = true, forecastArgs = null;
+  try { chartsOn = localStorage.getItem('now-charts') !== 'off'; } catch {}
+  function paintChartsToggle() {
+    chartsToggle.setAttribute('aria-pressed', String(chartsOn));
+    chartsToggle.title = chartsOn ? 'Hide charts' : 'Show charts';
+  }
+  paintChartsToggle();
+  chartsToggle.addEventListener('click', () => {
+    chartsOn = !chartsOn; paintChartsToggle();
+    try { if (chartsOn) localStorage.removeItem('now-charts'); else localStorage.setItem('now-charts', 'off'); } catch {}
+    forecastKey = '';
+    if (chartsOn && forecastArgs) renderForecast(...forecastArgs);
+    animateCharts(chartsOn);
+  });
+  // Height and opacity fold together, so the board below rides up with the block; gap folds too.
+  let chartsMotion = null;
+  function animateCharts(show) {
+    const [time = '0ms', easing = 'ease'] = getComputedStyle(document.documentElement).getPropertyValue('--motion-hover').trim().split(/\s+/);
+    const duration = parseFloat(time) * (time.endsWith('ms') ? 1 : 1000) || 0;
+    chartsMotion?.cancel(); chartsMotion = null;
+    if (show && forecastEl.hidden) return;
+    if (!duration || matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      forecastEl.hidden = !show; requestAnimationFrame(drawTrees); return;
+    }
+    forecastEl.hidden = false;
+    const style = getComputedStyle(forecastEl), gap = parseFloat(getComputedStyle(forecastEl.parentElement).rowGap) || 0;
+    const open = {height: forecastEl.offsetHeight + 'px', opacity: 1, marginBottom: '0px', paddingTop: style.paddingTop, paddingBottom: style.paddingBottom};
+    const closed = {height: '0px', opacity: 0, marginBottom: -gap + 'px', paddingTop: '0px', paddingBottom: '0px'};
+    const motion = forecastEl.animate(show ? [closed, open] : [open, closed], {duration, easing});
+    chartsMotion = motion;
+    motion.onfinish = () => {
+      if (chartsMotion !== motion) return;
+      chartsMotion = null;
+      if (!show) forecastEl.hidden = true;
+      drawTrees();
+    };
+  }
+  // Phone width: one control row, a shorter chart, fewer ticks; the verdicts carry the end labels.
+  const narrowChart = () => forecastEl.clientWidth < 560;
+  const shortScenario = {now: 'Now', rebalance: 'Rebalance', claude: 'Claude', codex: 'Codex'};
   function renderForecast(forecast, now, share = 0.5) {
+    forecastArgs = [forecast, now, share];
     const tools = ['claude', 'codex'].filter(tool => forecast?.[tool]);
     if (!modules.forecast) blockView = 'burn';
     if (!modules.burn_rate) blockView = 'forecast';
     if (!modules.scenarios) scenario = 'now';
     const visible = blockView === 'burn' ? modules.burn_rate && (Object.keys(burnData).length || modules.forecast && tools.length) : modules.forecast && tools.length;
-    forecastEl.hidden = !visible;
+    chartsToggle.hidden = !visible;
+    if (!chartsMotion) forecastEl.hidden = !visible || !chartsOn;
     if (!visible) { forecastData = null; return; }
+    if (!chartsOn) { forecastKey = ''; return; }
+    forecastEl.classList.toggle('narrow', narrowChart()); // measured only once the block is shown
     const key = JSON.stringify([forecast, Math.floor(now / 300), Math.round(share * 100), scenario, forecastEl.clientWidth, blockView, burnPeriod, burnData]);
     if (key === forecastKey) return;
     if (blockView === 'burn') { forecastKey = key; forecastData = {forecast, now, share}; renderBurn(now); return; }
@@ -442,8 +496,10 @@ window.createNowView = ({node, text}) => {
       verdicts.append(item);
     }
     const switcher = node('div', 'now-forecast-scenarios'); switcher.setAttribute('role', 'radiogroup'); switcher.setAttribute('aria-label', 'Scenario');
+    const narrow = narrowChart();
     for (const [id, label] of scenarios) {
-      const b = node('button', 'now-forecast-scenario', label); b.type = 'button';
+      const b = node('button', 'now-forecast-scenario', narrow ? shortScenario[id] || label : label); b.type = 'button';
+      if (narrow) b.title = label;
       b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', String(id === scenario)); b.dataset.scenario = id;
       b.addEventListener('click', () => {
         scenario = id; try { localStorage.setItem('now-forecast-scenario', id); } catch {}
@@ -451,7 +507,7 @@ window.createNowView = ({node, text}) => {
       });
       switcher.append(b);
     }
-    top.append(verdicts, ...(modules.scenarios ? [switcher] : []), ...(modules.burn_rate ? [viewSwitch()] : []));
+    top.append(verdicts, ...(modules.scenarios ? [switcher] : []), ...(modules.burn_rate && !narrow ? [viewSwitch()] : []));
     // Answers sit side by side (label over value), so the chart keeps the same height in every scenario.
     const facts = node('div', 'now-forecast-answers');
     for (const [label, value, hint] of result.rows) {
@@ -469,14 +525,14 @@ window.createNowView = ({node, text}) => {
       facts.append(fact);
     }
     const legend = node('p', 'now-forecast-legend');
-    for (const [cls, label] of [['actual', 'used'], ['projected', 'forecast'], ['even', 'even pace']]) {
+    for (const [cls, label] of [['actual', 'used'], ['projected', 'forecast'], ['even', narrow ? 'even' : 'even pace']]) {
       const k = node('span', 'now-forecast-key ' + cls); k.append(node('i'), label); legend.append(k);
     }
-    const bottom = node('div', 'now-forecast-bottom'); bottom.append(facts, legend);
+    const bottom = node('div', 'now-forecast-bottom'); bottom.append(facts, legend, ...(modules.burn_rate && narrow ? [viewSwitch()] : []));
     head.append(top, bottom);
     forecastEl.replaceChildren(head);
-    const W = Math.max(300, forecastEl.clientWidth - 20), H = 500 - 20 - 90 - 10; // fixed head height keeps the chart the same size
-    const pad = {l: 40, r: 120, t: 15, b: 30};
+    const W = Math.max(narrow ? 200 : 300, forecastEl.clientWidth - 20), H = narrow ? 260 : 500 - 20 - 90 - 10; // fixed head height keeps the chart the same size
+    const pad = narrow ? {l: 36, r: 12, t: 15, b: 30} : {l: 40, r: 120, t: 15, b: 30};
     const x0 = Math.min(...tools.map(t => forecast[t].start)), x1 = Math.max(...tools.map(t => forecast[t].resets_at));
     const X = at => pad.l + (at - x0) / (x1 - x0) * (W - pad.l - pad.r);
     const Y = pct => pad.t + (1 - Math.min(110, Math.max(0, pct)) / 110) * (H - pad.t - pad.b);
@@ -494,10 +550,13 @@ window.createNowView = ({node, text}) => {
       add('text', {x: pad.l - 10, y: Y(pct) + 4, class: 'axis', 'text-anchor': 'end'}).textContent = pct + '%';
     }
     const day = new Date(x0 * 1000); day.setHours(24, 0, 0, 0);
-    for (let at = day.getTime() / 1000; at < x1; at += 86400) {
+    // Day labels need about 30px ("Mon") or 50px ("Mon 3"); skip days until they fit.
+    const perDay = (W - pad.l - pad.r) * 86400 / (x1 - x0), withDate = perDay >= 60, every = Math.max(1, Math.ceil((withDate ? 50 : 30) / perDay));
+    for (let at = day.getTime() / 1000, i = 0; at < x1; at += 86400, i++) {
       add('line', {x1: X(at), x2: X(at), y1: pad.t, y2: H - pad.b, class: 'grid'});
+      if (i % every || X(at + 43200) > W - pad.r) continue;
       add('text', {x: X(at + 43200), y: H - 10, class: 'axis', 'text-anchor': 'middle'}).textContent =
-        new Date(at * 1000).toLocaleDateString('en-GB', {weekday: 'short', day: 'numeric'});
+        new Date(at * 1000).toLocaleDateString('en-GB', withDate ? {weekday: 'short', day: 'numeric'} : {weekday: 'short'});
     }
     add('line', {x1: X(now), x2: X(now), y1: pad.t, y2: H - pad.b, class: 'now'});
     // Each tool's reset is its deadline: a vertical line in its colour, labelled at the top.
@@ -528,7 +587,7 @@ window.createNowView = ({node, text}) => {
           markText = Number.isFinite(f.credits_out_at) ? `credits out ${when(f.credits_out_at)}` : 'credits to reset';
         }
         add('circle', {cx: X(markAt), cy: Y(endPct), r: 4, class: 'end'}, g);
-        labels.push({tool, x: X(markAt) + 10, y: Y(endPct) + 4, text: markText});
+        if (!narrow) labels.push({tool, x: X(markAt) + 10, y: Y(endPct) + 4, text: markText});
       }
       add('circle', {cx: X(now), cy: Y(f.used_percent), r: 4, class: 'dot'}, g);
       labels.push({tool, x: X(now) - 10, y: Y(f.used_percent) - 10, anchor: 'end', text: `${toolName(tool)} ${Math.round(f.used_percent)}%`});
@@ -566,7 +625,7 @@ window.createNowView = ({node, text}) => {
     });
     hit.addEventListener('pointerleave', () => { cross.setAttribute('visibility', 'hidden'); tipEl.hidden = true; });
     // Reset marks: the tool's icon at the foot of its reset line; details on hover.
-    for (const {tool, f} of modules.branding ? resetMarks : []) {
+    for (const {tool, f} of modules.branding && !narrow ? resetMarks : []) {
       // Round 24px logo, no outline.
       const mark = add('g', {class: 'reset-mark', 'data-tool': tool, transform: `translate(${X(f.resets_at) - 12} ${H - pad.b - 29})`});
       const clipId = 'now-reset-clip-' + tool, clip = add('clipPath', {id: clipId}, mark);
@@ -598,10 +657,75 @@ window.createNowView = ({node, text}) => {
     }
     return new Map(agents.filter(agent => keep.has(agent.id)).map(agent => [agent.id, agent]));
   }
+  // Columns can be put out of sight and brought back from the header menu; remembered in this browser.
+  const hiddenColumns = new Set();
+  try { const saved = JSON.parse(localStorage.getItem('now-hidden-columns') || '[]'); if (Array.isArray(saved)) saved.forEach(p => typeof p === 'string' && hiddenColumns.add(p)); } catch {}
+  const columnsToggle = document.getElementById('columns-toggle'), columnsMenu = document.getElementById('columns-menu');
+  const columnsCount = document.getElementById('columns-hidden-count');
+  const eyeOff = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m3 3 18 18M10.6 10.6a2 2 0 0 0 2.8 2.8M9.8 5.3C16 3.8 21 12 21 12a18 18 0 0 1-3.3 4M6.3 6.3A19 19 0 0 0 3 12s7 11 14.7 5.7"/></svg>';
+  function setColumnHidden(project, hidden) {
+    if (hidden) hiddenColumns.add(project); else hiddenColumns.delete(project);
+    try { localStorage.setItem('now-hidden-columns', JSON.stringify([...hiddenColumns])); } catch {}
+    paintColumns();
+    requestAnimationFrame(drawTrees);
+  }
+  function paintColumns() {
+    let hiddenCount = 0, hiddenNeeds = 0;
+    for (const [project, group] of groups) {
+      const hidden = hiddenColumns.has(project);
+      group.el.hidden = hidden;
+      if (hidden) { hiddenCount++; hiddenNeeds += group.cards.filter(v => needsYou(v.agent)).length; }
+    }
+    board.style.setProperty('--cols', String(Math.max(1, groups.size - hiddenCount)));
+    columnsCount.hidden = !hiddenCount;
+    if (columnsCount.dataset.n !== String(hiddenCount)) {
+      columnsCount.dataset.n = String(hiddenCount);
+      columnsCount.replaceChildren(String(hiddenCount || ''), ...(hiddenCount ? [node('span', 'now-tool-word', ' hidden')] : []));
+    }
+    columnsToggle.classList.toggle('need', hiddenNeeds > 0);
+    columnsToggle.title = hiddenNeeds ? `Columns: a hidden column needs attention` : 'Columns';
+    if (!columnsMenu.hidden) fillColumnsMenu();
+  }
+  function fillColumnsMenu() {
+    const rows = [node('p', 'now-menu-title', 'Columns')];
+    for (const [project, group] of groups) {
+      const label = node('label', 'now-menu-row'), box = node('input');
+      box.type = 'checkbox'; box.checked = !hiddenColumns.has(project);
+      box.addEventListener('change', () => setColumnHidden(project, !box.checked));
+      const name = node('span', 'now-menu-name', project);
+      label.append(box, name);
+      if (group.cards.some(v => needsYou(v.agent))) label.append(node('span', 'now-menu-need', 'needs you'));
+      rows.push(label);
+    }
+    if (groups.size === 0) rows.push(node('p', 'now-menu-empty', 'No columns yet'));
+    if ([...groups.keys()].some(p => hiddenColumns.has(p))) {
+      const all = node('button', 'now-menu-all', 'Show all'); all.type = 'button';
+      all.addEventListener('click', () => { for (const p of groups.keys()) hiddenColumns.delete(p); setColumnHidden('', false); });
+      rows.push(all);
+    }
+    const focused = columnsMenu.contains(document.activeElement) ? document.activeElement.closest('label')?.textContent : null;
+    columnsMenu.replaceChildren(...rows);
+    if (focused) [...columnsMenu.querySelectorAll('label')].find(l => l.textContent === focused)?.querySelector('input').focus();
+  }
+  function openColumnsMenu(open) {
+    columnsMenu.hidden = !open; columnsToggle.setAttribute('aria-expanded', String(open));
+    if (open) { fillColumnsMenu(); columnsMenu.querySelector('input')?.focus(); }
+  }
+  columnsToggle.addEventListener('click', () => openColumnsMenu(columnsMenu.hidden));
+  document.addEventListener('pointerdown', event => {
+    if (!columnsMenu.hidden && !columnsMenu.contains(event.target) && !columnsToggle.contains(event.target)) openColumnsMenu(false);
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !columnsMenu.hidden) { openColumnsMenu(false); columnsToggle.focus(); }
+  });
   function createGroup(project) {
     const el = node('section', 'now-project'); el.dataset.project = project;
     const heading = node('h2'), name = node('span', '', project), counts = node('span', 'now-counts');
-    heading.append(name, counts);
+    const hide = node('button', 'now-column-hide'); hide.type = 'button';
+    hide.setAttribute('aria-label', `Hide column ${project}`); hide.title = 'Hide column, bring it back from the Columns menu';
+    hide.innerHTML = eyeOff;
+    hide.addEventListener('click', () => { setColumnHidden(project, true); columnsToggle.focus(); });
+    heading.append(name, counts, hide);
     const items = node('div', 'now-items');
     const lines = document.createElementNS(svgNS, 'svg');
     lines.classList.add('now-tree'); lines.setAttribute('aria-hidden', 'true');
@@ -641,7 +765,7 @@ window.createNowView = ({node, text}) => {
     const status = node('div', 'now-status'), dot = node('span', 'now-dot'), action = node('span', 'now-action');
     status.append(dot, action);
     const time = node('p', 'now-time'), details = node('div', 'now-details'), footer = node('div', 'now-footer');
-    const context = node('span', 'now-context'), percent = node('span');
+    const context = node('span', 'now-context');
     context.hidden = true; context.setAttribute('role', 'img');
     const ring = document.createElementNS(svgNS, 'svg');
     ring.setAttribute('viewBox', '0 0 16 16'); ring.setAttribute('aria-hidden', 'true');
@@ -652,10 +776,10 @@ window.createNowView = ({node, text}) => {
     };
     const fill = circle('now-context-fill');
     fill.setAttribute('pathLength', '100'); fill.setAttribute('transform', 'rotate(-90 8 8)');
-    ring.append(circle('now-context-track'), fill); context.append(ring, percent);
+    ring.append(circle('now-context-track'), fill); context.append(ring);
     footer.append(status, time, context); details.append(footer);
     el.append(top, task, details); group.items.append(el);
-    const view = {el, who, model, task, status, action, time, context, percent, fill, group, depth: 0, agent};
+    const view = {el, who, model, task, status, action, time, context, fill, group, depth: 0, agent};
     cards.set(agent.id, view); group.cards.push(view);
     return view;
   }
@@ -675,13 +799,12 @@ window.createNowView = ({node, text}) => {
     view.time.replaceChildren(...times.map(value => node('span', '', value)));
     tip(view.time, times.length > 1
       ? {title: agent.status === 'working' ? 'Working' : 'Worked', rows: [['Started', times[0]], ['Duration', times[1]]]}
-      : {title: times[0]});
+      : {title: agent.orchestrator ? `Last reply ${times[0]}` : times[0]});
     const known = Number.isFinite(agent.context_used) && agent.context_used >= 0
       && Number.isFinite(agent.context_window) && agent.context_window > 0;
     view.context.hidden = !known;
     if (known) {
       const pct = Math.max(0, Math.min(100, agent.context_used / agent.context_window * 100));
-      text(view.percent, Math.round(pct) + '%');
       view.context.setAttribute('aria-label', `Context window ${Math.round(pct)}% used`);
       view.context.dataset.level = pct >= 80 ? 'high' : pct >= 50 ? 'mid' : 'low';
       view.fill.setAttribute('stroke-dasharray', `${pct} 100`);
@@ -691,6 +814,7 @@ window.createNowView = ({node, text}) => {
     }
     view.el.classList.toggle('need', needsYou(agent));
     view.el.classList.toggle('run', agent.status === 'working');
+    view.el.classList.toggle('quiet', agent.status === 'working' && Boolean(agent.quiet));
     view.el.classList.toggle('done', agent.status === 'done' || agent.completed === true);
     view.el.dataset.status = agent.status;
   }
@@ -722,9 +846,27 @@ window.createNowView = ({node, text}) => {
     }
   }
   function reading() { return overBoard || Boolean(document.getSelection()?.toString()); }
+  function showNotice() {
+    const message = [disconnected ? 'Source unavailable. Reconnecting…' : '',
+      paused ? 'Updates paused while reading.' : '', sourceIssue].filter(Boolean).join(' ');
+    text(error, message); error.hidden = !message;
+    error.dataset.kind = disconnected || sourceIssue ? 'problem' : 'paused';
+  }
   function flush() {
     if (!queued || reading()) return;
+    clearTimeout(pauseTimer); pauseTimer = null; paused = false;
     const data = queued; queued = null;
+    dayBounds = Number.isFinite(data.local_day?.start) && Number.isFinite(data.local_day?.end) ? data.local_day : null;
+    const names = {claude_sessions: 'Claude session logs', codex_sessions: 'Codex session logs', claude_desktop: 'Claude metadata',
+      codex_wrapper: 'Codex wrapper logs', claude_limits: 'Claude limits', codex_limits: 'Codex limits',
+      claude_usage: 'Claude usage', codex_meter: 'Codex usage', quota_history: 'Quota history'};
+    const reasons = {permission_denied: 'permission denied', file_missing: 'a required file is missing',
+      not_a_directory: 'the configured location is not a folder', not_a_file: 'a log location is a folder',
+      unrecognized_format: 'format not recognized', read_failed: 'a file read failed', reader_failed: 'the local reader failed'};
+    const problems = Object.entries(data.sources || {}).filter(([, value]) => ['unavailable', 'unsupported'].includes(value.status))
+      .map(([name, value]) => `${names[name] || 'Local data'} can't be read: ${reasons[value.reason]
+        || (value.status === 'unsupported' ? 'format not recognized' : 'a file read failed')}.`);
+    sourceIssue = problems.join(' ');
     // A new page version on the server reloads the open page, so nobody has to press reload.
     if (data.build) {
       if (loadedBuild && loadedBuild !== data.build) { location.reload(); return; }
@@ -733,7 +875,7 @@ window.createNowView = ({node, text}) => {
     // Existing cards keep their order; newly seen cards append after their parent.
     // Finished work leaves after 30 min, with ancestors kept while children are active.
     const everyone = [...(data.agents || []), ...(data.completed || [])];
-    empty.hidden = everyone.length > 0 || data.codex_chats?.hidden > 0;
+    empty.hidden = everyone.length > 0 || data.codex_chats?.hidden > 0 || Boolean(sourceIssue);
     const incoming = retainedCards(everyone, data.now);
     // A same-title successor takes its predecessor's place, above existing workers.
     for (const agent of incoming.values()) {
@@ -819,7 +961,8 @@ window.createNowView = ({node, text}) => {
       group.counts.replaceChildren(...[c.needs ? `${c.needs} needs attention` : '', c.running ? `${c.running} running` : '',
         c.done ? `${c.done} done` : ''].filter(Boolean).map(value => node('span', '', value)));
     }
-    error.hidden = true; drawTrees();
+    paintColumns();
+    showNotice(); drawTrees();
   }
   board.addEventListener('pointerenter', () => { overBoard = true; });
   board.addEventListener('pointerleave', () => { overBoard = false; flush(); });
@@ -828,5 +971,13 @@ window.createNowView = ({node, text}) => {
   document.fonts.ready.then(drawTrees);
   return {configure(config) { modules = config.modules || {}; projectOrder = config.project_order || [];
     WORK = config.work_hours || [9, 21]; WORK_DAY = WORK[1] - WORK[0]; },
-    render(data) { queued = data; flush(); }, error() { text(error, 'Source unavailable. Reconnecting…'); error.hidden = false; }};
+    render(data) {
+      disconnected = false; queued = data;
+      if (reading() && !pauseTimer && !paused) pauseTimer = setTimeout(() => {
+        pauseTimer = null;
+        if (queued && reading()) { paused = true; showNotice(); }
+      }, 10000);
+      flush(); showNotice();
+    },
+    error() { disconnected = true; showNotice(); }};
 };

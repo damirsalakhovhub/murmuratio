@@ -19,3 +19,18 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -B -m unittest discover -s tests -v
+
+  browser:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tests/package-lock.json
+      - run: npm ci --prefix tests
+      - run: npm run test:browser --prefix tests

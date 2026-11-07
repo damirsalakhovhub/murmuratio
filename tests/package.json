@@ -2,7 +2,9 @@
   "name": "murmuratio-tests",
   "private": true,
   "scripts": {
-    "test:browser": "node browser_modules_test.cjs && node browser_now_test.cjs && node browser_codex_test.cjs"
+    "test:browser": "node browser_states_test.cjs && node browser_modules_test.cjs && node browser_now_test.cjs && node browser_codex_test.cjs && node browser_real_board_test.cjs && npm run test:smoke && npm run test:scale",
+    "test:smoke": "node browser_release_smoke_test.cjs",
+    "test:scale": "node browser_scale_test.cjs"
   },
   "devDependencies": {
     "puppeteer-core": "24.23.0"

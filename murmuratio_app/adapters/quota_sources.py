@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 import time
-from murmuratio_app.adapters.base import Adapter, UnavailableSource, UnsupportedSource
+from murmuratio_app.adapters.base import Adapter, AbsentSource, UnavailableSource, UnsupportedSource
 from murmuratio_app.adapters.limits import limit_window, rollout_limits
 from murmuratio_app.common import timestamp
 
@@ -19,10 +19,12 @@ class ClaudeLimitsAdapter(Adapter):
         self.paths = [self.path] + ([Path(legacy_path)] if legacy_path is not None else [])
         self.clock = clock
         self.age_seconds = None
+        self.stale = False
 
     def collect(self):
         self.age_seconds = None
-        candidates, invalid = [], False
+        self.stale = False
+        candidates, invalid, unreadable = [], False, False
         for path in self.paths:
             try:
                 data = json.loads(path.read_text())
@@ -45,7 +47,7 @@ class ClaudeLimitsAdapter(Adapter):
             except (ValueError, TypeError, UnicodeError):
                 invalid = True
             except OSError:
-                continue
+                unreadable = True
         usable = [candidate for candidate in candidates if candidate[1]]
         if not usable:
             if candidates:
@@ -54,15 +56,22 @@ class ClaudeLimitsAdapter(Adapter):
                 invalid = invalid or malformed
             if invalid:
                 raise UnsupportedSource()
-            raise UnavailableSource()
+            if unreadable:
+                raise UnavailableSource()
+            if not candidates:
+                raise AbsentSource()
+            return
         at, windows, malformed = max(usable, key=lambda item: item[0])
         now = self.clock()
         self.age_seconds = max(0, now - at)
-        if (self.age_seconds > CLAUDE_LIMITS_STALE_SECONDS
-                or any(window['resets_at'] is not None and window['resets_at'] <= now for window in windows)):
-            self.status = 'stale'
-        elif malformed:
+        self.stale = (self.age_seconds > CLAUDE_LIMITS_STALE_SECONDS
+                      or any(window['resets_at'] is not None and window['resets_at'] <= now for window in windows))
+        if invalid or malformed:
             self.unsupported()
+        elif unreadable:
+            self.unavailable()
+        elif self.stale:
+            self.status = 'stale'
         for window in windows:
             yield self.observation(window, at)
 
@@ -70,16 +79,19 @@ class ClaudeLimitsAdapter(Adapter):
 class CodexLimitsAdapter(Adapter):
     name = 'codex_limits'
 
-    def __init__(self, root):
+    def __init__(self, root, clock=time.time):
         super().__init__()
         self.root = Path(root)
+        self.clock = clock
+        self.age_seconds = None
+        self.stale = False
 
     def collect(self):
-        if not self.root.is_dir():
-            raise UnavailableSource()
+        self.age_seconds = None
+        self.stale = False
         files = []
         root = self.root.resolve()
-        for path in self.root.glob('*/*/*/rollout-*.jsonl'):
+        for path in self.files('*/*/*/rollout-*.jsonl'):
             try:
                 if not path.resolve().is_relative_to(root):
                     self.unsupported()
@@ -87,7 +99,7 @@ class CodexLimitsAdapter(Adapter):
                 files.append((path.stat().st_mtime, path))
             except OSError:
                 self.unavailable()
-        for modified, path in sorted(files, reverse=True)[:5]:
+        for _, path in sorted(files, reverse=True)[:5]:
             try:
                 with path.open('rb') as handle:
                     handle.seek(max(0, path.stat().st_size - 400000))
@@ -124,8 +136,14 @@ class CodexLimitsAdapter(Adapter):
                 windows = rollout_limits(data)
                 if windows:
                     at = timestamp(data.get('timestamp')) if isinstance(data, dict) else None
+                    now = self.clock()
+                    self.age_seconds = max(0, now - at) if at is not None else None
+                    self.stale = (self.age_seconds is None or self.age_seconds > CLAUDE_LIMITS_STALE_SECONDS
+                                  or any(window['resets_at'] is not None and window['resets_at'] <= now for window in windows))
+                    if self.stale and self.status == 'available':
+                        self.status = 'stale'
                     for window in windows:
-                        yield self.observation(window, at if at is not None else modified)
+                        yield self.observation(window, at)
                     return
                 stack = [data]
                 while stack:

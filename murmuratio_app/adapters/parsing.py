@@ -4,7 +4,7 @@ from pathlib import Path
 import re
 import shlex
 from murmuratio_app.common import one_line, timestamp
-from murmuratio_app.adapters.shared import (current_action, content_action, context_number)
+from murmuratio_app.adapters.shared import (CLAUDE_TURN_FINISHED, current_action, content_action, context_number)
 from murmuratio_app.adapters.limits import limit_window
 from murmuratio_app.adapters.activity import start_turn, record_activity, end_turn
 
@@ -215,7 +215,7 @@ def consume_claude(data, record):
             data.setdefault('first_user', first_line)
     data['last_turn'] = message.get('stop_reason') if kind == 'assistant' else 'user'
     record_activity(data, at)
-    if kind == 'assistant' and message.get('stop_reason') == 'end_turn' and at is not None:
+    if kind == 'assistant' and message.get('stop_reason') in CLAUDE_TURN_FINISHED and at is not None:
         data['waiting_since'] = at
         end_turn(data, at)
     if kind == 'assistant':

@@ -16,7 +16,7 @@ import unittest
 from unittest.mock import patch
 from urllib.request import urlopen
 
-from murmuratio_app.adapters.quota_sources import CLAUDE_LIMITS_STALE_SECONDS, ClaudeLimitsAdapter
+from murmuratio_app.adapters.quota_sources import CLAUDE_LIMITS_STALE_SECONDS, ClaudeLimitsAdapter, CodexLimitsAdapter
 import murmuratio_app.cli as cli_module
 from murmuratio_app.cli import DEFAULT_CONFIG, LABEL, Paths, install, uninstall
 from murmuratio_app.config import Config, MODULES
@@ -337,8 +337,24 @@ class InstallTests(unittest.TestCase):
         self.assertIn('Codex:', result.stdout)
         self.assertIn(str(cache), result.stdout)
         self.assertIn('claude_limits: stale, age ', result.stdout)
-        self.assertIn('claude_sessions: unavailable', result.stdout)
+        self.assertIn('claude_sessions: absent', result.stdout)
+        self.assertIn('codex_sessions: absent', result.stdout)
         self.assertEqual(self.tree(), before)
+
+    def test_doctor_distinguishes_absent_and_unreadable_sources(self):
+        codex = self.home / '.codex'
+        root = codex / 'sessions'
+        root.mkdir(parents=True)
+        scan = os.scandir
+        def denied(path):
+            if Path(path) == root:
+                raise PermissionError('synthetic denial')
+            return scan(path)
+        output = io.StringIO()
+        with patch.dict(os.environ, {'CODEX_HOME': str(codex)}), patch('os.scandir', side_effect=denied), redirect_stdout(output):
+            cli_module.doctor(self.paths)
+        self.assertIn('claude_sessions: absent', output.getvalue())
+        self.assertIn('codex_sessions: unavailable', output.getvalue())
 
     def test_run_serves_loopback_with_temp_home(self):
         with socket.socket() as sock:
@@ -478,9 +494,53 @@ class LimitsCacheTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({'at': at, 'rate_limits': {'five_hour': {'used_percentage': used, 'resets_at': 3000000}}}))
 
+    def test_R4_codex_limit_freshness_and_forecast_exclusion(self):
+        path = self.home / '.codex/sessions/2026/11/07/rollout-test.jsonl'
+        path.parent.mkdir(parents=True)
+        def sample(at, reset=3000000):
+            record = {'type': 'event_msg', 'payload': {'rate_limits': {'secondary': {
+                'used_percent': 12, 'window_minutes': 10080, 'resets_at': reset}}}}
+            if at is not None:
+                record['timestamp'] = at
+            path.write_text(json.dumps(record) + '\n')
+        adapter = CodexLimitsAdapter(self.home / '.codex/sessions', clock=lambda: self.now)
+        for at, reset, status in [(self.now - 1800, 3000000, 'available'),
+                                  (self.now - 1801, 3000000, 'stale'),
+                                  (None, 3000000, 'stale'), (self.now, self.now, 'stale')]:
+            with self.subTest(at=at, reset=reset):
+                sample(at, reset)
+                self.assertEqual(adapter.read().status, status)
+        sample(self.now - 1801)
+        config = Config.load(self.home)
+        config.modules['forecast'] = True
+        config.modules['routing'] = True
+        source = NowSource(self.home, config=config, clock=lambda: self.now)
+        state = source.state()
+        self.assertEqual(state['sources']['codex_limits']['status'], 'stale')
+        self.assertIsNone(state['forecast']['codex'])
+        self.assertIsNone(state['routing']['codex']['headroom'])
+
+    def test_R3_and_R4_stale_fallback_does_not_hide_unreadable_cache(self):
+        self.write_cache(self.legacy, self.now - 1801)
+        self.cache.parent.mkdir(parents=True)
+        self.cache.write_text('{}')
+        read_text = Path.read_text
+        def deny_primary(path, *args, **kwargs):
+            if path == self.cache:
+                raise PermissionError('synthetic denial')
+            return read_text(path, *args, **kwargs)
+        config = Config.load(self.home)
+        config.modules['forecast'] = True
+        source = NowSource(self.home, config=config, clock=lambda: self.now)
+        with patch.object(Path, 'read_text', deny_primary):
+            state = source.state()
+        self.assertEqual(state['sources']['claude_limits']['status'], 'unavailable')
+        self.assertTrue(state['sources']['claude_limits']['stale'])
+        self.assertIsNone(state['forecast']['claude'])
+
     def test_missing_and_stale_have_age_and_stale_is_not_used_for_forecasts(self):
         missing = self.adapter.read()
-        self.assertEqual(missing.status, 'unavailable')
+        self.assertEqual(missing.status, 'absent')
         self.assertIsNone(missing.age_seconds)
         self.write_cache(self.cache, self.now - CLAUDE_LIMITS_STALE_SECONDS - 1)
         stale = self.adapter.read()
@@ -516,7 +576,7 @@ class LimitsCacheTests(unittest.TestCase):
         self.assertEqual(result.values(), [])
         self.cache.write_text('{"at": 3, "rate_limits":{}}')
         result = self.adapter.read()
-        self.assertEqual(result.status, 'unavailable')
+        self.assertEqual(result.status, 'available')
         self.assertEqual(result.age_seconds, self.now - 3)
 
     def test_passed_reset_and_partially_invalid_old_cache_are_stale(self):
@@ -529,7 +589,8 @@ class LimitsCacheTests(unittest.TestCase):
         value['rate_limits']['seven_day'] = {'used_percentage': 'unknown'}
         self.cache.write_text(json.dumps(value))
         result = self.adapter.read()
-        self.assertEqual(result.status, 'stale')
+        self.assertEqual(result.status, 'unsupported')
+        self.assertTrue(self.adapter.stale)
         self.assertEqual(result.values()[0]['used_percent'], 12)
 
 

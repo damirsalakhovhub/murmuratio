@@ -1,6 +1,6 @@
 """Read normalized usage observations from Claude and Codex session files."""
 from pathlib import Path
-from murmuratio_app.adapters.base import Adapter, UnavailableSource
+from murmuratio_app.adapters.base import Adapter
 from murmuratio_app.adapters.parsing import consume_codex_meter, consume_usage
 from murmuratio_app.adapters.shared import JsonlSummary
 
@@ -14,10 +14,8 @@ class ClaudeUsageAdapter(Adapter):
         self.cache = {}
 
     def collect(self, since, desktop, include_models):
-        if not self.root.is_dir():
-            raise UnavailableSource()
         seen = set()
-        for path in [*self.root.glob('*/*.jsonl'), *self.root.glob('*/*/subagents/*.jsonl')]:
+        for path in [*self.files('*/*.jsonl'), *self.files('*/*/subagents/*.jsonl')]:
             try:
                 if path.stat().st_mtime < since:
                     continue
@@ -46,11 +44,9 @@ class CodexMeterAdapter(Adapter):
         self.cache = {}
 
     def collect(self, now, include_credits, include_burn):
-        if not self.root.is_dir():
-            raise UnavailableSource()
         seen = set()
         root = self.root.resolve()
-        for path in self.root.glob('*/*/*/rollout-*.jsonl'):
+        for path in self.files('*/*/*/rollout-*.jsonl'):
             try:
                 if not path.resolve().is_relative_to(root):
                     self.unsupported()

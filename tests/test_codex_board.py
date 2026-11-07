@@ -1,5 +1,6 @@
 """Default Codex board discovery and conservative Claude attribution."""
 import json
+import errno
 import http.client
 import os
 from pathlib import Path
@@ -271,6 +272,54 @@ class CodexBoardTests(unittest.TestCase):
         self.assertEqual(agents['codex:run-identifier']['status'], 'working')
         self.assertEqual(agents['codex:run-identifier']['context_used'], 42000)
 
+    def test_R3_finished_wrapper_with_expired_temporary_events_is_available(self):
+        self.source.config.modules['codex_wrapper'] = True
+        directory = self.home / '.claude/tools/codex-runs'
+        directory.mkdir(parents=True)
+        (directory / 'finished.json').write_text(json.dumps({
+            'status': 'done', 'started': self.now - 60, 'ended': self.now - 10,
+            'events': str(self.home / 'expired-temporary-events.jsonl')}))
+        state = self.source.state()
+        self.assertEqual(state['completed'][0]['status'], 'done')
+        self.assertNotIn('codex_wrapper', state.get('sources', {}))
+
+    def test_R3_wrapper_missing_or_empty_directory_is_absent(self):
+        self.source.config.modules['codex_wrapper'] = True
+        for create in (False, True):
+            with self.subTest(directory_exists=create):
+                if create:
+                    (self.home / '.claude/tools/codex-runs').mkdir(parents=True)
+                state = self.source.state()
+                self.assertEqual(state['sources']['codex_wrapper']['status'], 'absent')
+
+    def test_R3_wrapper_permission_failure_has_a_private_safe_reason(self):
+        self.source.config.modules['codex_wrapper'] = True
+        directory = self.home / '.claude/tools/codex-runs'
+        directory.mkdir(parents=True)
+        events = self.home / 'events.jsonl'
+        events.write_text('{}\n')
+        (directory / 'running.json').write_text(json.dumps({
+            'status': 'running', 'started': self.now - 60, 'pid': 7, 'events': str(events)}))
+        open_file = Path.open
+        def denied(path, *args, **kwargs):
+            if path == events:
+                raise PermissionError(errno.EACCES, 'private exception detail', str(events))
+            return open_file(path, *args, **kwargs)
+        with patch.object(Path, 'open', denied):
+            state = self.source.state()
+        self.assertEqual(state['sources']['codex_wrapper'], {
+            'status': 'unavailable', 'reason': 'permission_denied'})
+        self.assertNotIn('private exception detail', json.dumps(state['sources']))
+        self.assertNotIn(str(self.home), json.dumps(state['sources']))
+
+    def test_R3_unreadable_empty_wrapper_directory_is_a_problem(self):
+        self.source.config.modules['codex_wrapper'] = True
+        (self.home / '.claude/tools/codex-runs').mkdir(parents=True)
+        with patch('os.scandir', side_effect=PermissionError(errno.EACCES, 'synthetic denial')):
+            state = self.source.state()
+        self.assertEqual(state['sources']['codex_wrapper'], {
+            'status': 'unavailable', 'reason': 'permission_denied'})
+
     def test_run_id_deduplicates_when_wrapper_has_no_thread(self):
         self.rollout('thread', run_id='run-identifier')
         self.source.config.modules['codex_wrapper'] = True
@@ -384,7 +433,7 @@ class CodexBoardTests(unittest.TestCase):
 
     def test_inactive_codex_without_writer_moves_to_completed_after_30_minutes(self):
         self.source.config.show_codex_chats = True
-        for source, finished in [('exec', False), ('vscode', False), ('vscode', True)]:
+        for source, finished in [('exec', False), ('vscode', False)]:
             with self.subTest(source=source, finished=finished):
                 path = self.rollout('stale', source=source, started=self.now - 1900, finished=finished)
                 last_at = self.now - 1800
@@ -406,6 +455,35 @@ class CodexBoardTests(unittest.TestCase):
                     self.assertEqual(self.source.state()['completed'][0]['seconds'], seconds)
                 self.assertEqual(before, (path.read_bytes(), path.stat().st_mtime_ns))
                 path.unlink()
+
+    def test_S4_finished_chat_does_not_crash_after_idle(self):
+        self.source.config.show_codex_chats = True
+        path = self.rollout('finished-chat', source='vscode', started=self.now - 1900, finished=True)
+        with patch('murmuratio_app.adapters.codex_board.rollout_writers', return_value=set()) as probe:
+            state = self.source.state()
+        agent, = state['agents']
+        self.assertEqual((agent['status'], agent['completed']), ('waiting', False))
+        probe.assert_not_called()
+
+    def test_B2_run_id_does_not_match_a_different_thread_namespace(self):
+        self.source.config.modules['codex_wrapper'] = True
+        directory = self.home / '.claude/tools/codex-runs'
+        directory.mkdir(parents=True)
+        for name, thread in [('collision', 'thread-one'), ('run-two', 'collision')]:
+            (directory / (name + '.json')).write_text(json.dumps({
+                'status': 'running', 'thread': thread, 'started': self.now - 10, 'pid': 7}))
+        agents = self.agents()
+        self.assertEqual(set(agents), {'codex:collision', 'codex:run-two'})
+
+    def test_S5_wrapper_finished_before_midnight_is_still_discovered(self):
+        midnight = time.mktime((2026, 11, 7, 0, 0, 0, 0, 0, -1))
+        self.now = midnight + 60
+        self.source.config.modules['codex_wrapper'] = True
+        directory = self.home / '.claude/tools/codex-runs'
+        directory.mkdir(parents=True)
+        (directory / 'before-midnight.json').write_text(json.dumps({
+            'status': 'done', 'started': midnight - 600, 'ended': midnight - 300}))
+        self.assertIn('codex:before-midnight', self.agents())
 
     def test_inactive_codex_with_writer_or_failed_probe_stays_active(self):
         path = self.rollout('alive', started=self.now - 1900)
@@ -494,6 +572,16 @@ class CodexBoardTests(unittest.TestCase):
             self.assertEqual(state['agents'], [])
             self.assertEqual(state['completed'][0]['status'], 'crashed')
 
+    @unittest.skipUnless(Path('/usr/sbin/lsof').is_file(), 'macOS lsof is required')
+    def test_B1_live_writer_outside_discovery_window_reappears_after_append(self):
+        path = self.rollout('quiet-live', started=self.now - 86410)
+        os.utime(path, (self.now - 86401, self.now - 86401))
+        with path.open('a'):
+            self.assertEqual(rollout_writers([path]), {path})
+            self.assertNotIn('codex:quiet-live', self.agents())
+            self.write(path, [self.event('token_count', self.now - 1)])
+            self.assertEqual(self.agents()['codex:quiet-live']['status'], 'working')
+
     def test_claude_subagent_bash_result_links_to_owning_session(self):
         self.claude()
         path = self.home / '.claude/projects/project/parent/subagents/agent-one.jsonl'
@@ -508,7 +596,7 @@ class CodexBoardTests(unittest.TestCase):
         agent = self.agents()['codex:sub-thread']
         self.assertEqual((agent['parent_id'], agent['link']), ('claude:parent', 'exact'))
 
-    def test_long_running_bash_keeps_claude_parent_only_while_linked_worker_runs(self):
+    def test_long_running_bash_keeps_quiet_claude_parent_after_worker_finishes(self):
         launched = self.now - 300
         parent = self.home / '.claude/projects/project/parent.jsonl'
         self.write(parent, [
@@ -520,11 +608,12 @@ class CodexBoardTests(unittest.TestCase):
         agents = self.agents()
         self.assertEqual((agents['codex:long-running']['parent_id'], agents['codex:long-running']['link']),
                          ('claude:parent', 'inferred'))
-        self.assertEqual(agents['claude:parent']['status'], 'idle')
+        self.assertEqual(agents['claude:parent']['status'], 'working')
+        self.assertTrue(agents['claude:parent']['quiet'])
         self.write(path, [self.event('task_complete', self.now - 1)])
-        self.assertNotIn('claude:parent', self.agents())
+        self.assertEqual(self.agents()['claude:parent']['status'], 'working')
 
-    def test_ambiguous_long_running_launch_does_not_keep_stale_parent(self):
+    def test_ambiguous_long_running_launch_keeps_quiet_parent_unlinked(self):
         launched = self.now - 300
         parent = self.home / '.claude/projects/project/parent.jsonl'
         self.write(parent, [{'type': 'assistant', 'cwd': self.cwd, 'timestamp': launched,
@@ -534,7 +623,7 @@ class CodexBoardTests(unittest.TestCase):
         self.rollout('first-long', started=launched + 2)
         self.rollout('second-long', started=launched + 2)
         agents = self.agents()
-        self.assertNotIn('claude:parent', agents)
+        self.assertTrue(agents['claude:parent']['quiet'])
         self.assertIsNone(agents['codex:first-long']['parent_id'])
         self.assertIsNone(agents['codex:second-long']['parent_id'])
 

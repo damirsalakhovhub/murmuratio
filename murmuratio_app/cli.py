@@ -740,7 +740,7 @@ def doctor(paths):
     desktop = source.desktop_adapter.read()
     desktop_by_id = {row['cli_session_id']: row for row in desktop.values()}
     now = time.time()
-    results = [desktop, source.claude_adapter.read(now, desktop_by_id, set()),
+    results = [desktop, source.claude_adapter.read(now, desktop_by_id, set()), source.codex_board_adapter.read(now),
                source.claude_limits_adapter.read(), source.codex_limits_adapter.read()]
     if config.modules['codex_wrapper']:
         results.append(source.wrapper_adapter.read(now, set()))
@@ -776,6 +776,10 @@ def main(argv=None):
     install_parser.add_argument('--port', type=port_number, default=8765)
     uninstall_parser = commands.add_parser('uninstall')
     doctor_parser = commands.add_parser('doctor')
+    check_parser = commands.add_parser('check-update', help='Compare this code with a running local board')
+    check_parser.add_argument('--url', default='http://127.0.0.1:8765', help='Running local board URL')
+    check_parser.add_argument('--config', type=Path, help='Config used by the running board')
+    check_parser.add_argument('--codex-home', type=Path, help='Codex home used by the running board')
     run_parser = commands.add_parser('run')
     run_parser.add_argument('--port', type=port_number, default=8765)
     run_parser.add_argument('--config', type=Path)
@@ -806,6 +810,9 @@ def main(argv=None):
             install(paths, args)
         elif args.command == 'uninstall':
             uninstall(paths, args)
+        elif args.command == 'check-update':
+            from murmuratio_app.check_update import check_update
+            return check_update(args.url, paths.home, args.config, args.codex_home)
         elif args.command == 'doctor':
             if args.dry_run:
                 read_plan(paths, Config.load(paths.home))

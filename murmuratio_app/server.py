@@ -96,6 +96,10 @@ def make_handler(codex=None, public_url=None, reset=None, now=None, config=None)
                     query = parse_qs(parsed.query)
                     if parsed.path.endswith('/state'):
                         state = codex.state()
+                        titles = now.codex_titles() if now is not None and hasattr(now, 'codex_titles') and (config is None or config.modules['codex_wrapper']) else {}
+                        for session in state.get('sessions') or []:
+                            if isinstance(session, dict) and titles.get(session.get('id')):
+                                session['task'] = titles[session['id']]
                         status = 503 if state.get('source', {}).get('connected') is False else 200
                         if status == 503:
                             state['error'] = 'Source unavailable or format unsupported. Retrying.'
@@ -113,7 +117,7 @@ def make_handler(codex=None, public_url=None, reset=None, now=None, config=None)
                         if after is not None and after < 0:
                             raise ValueError('Invalid cursor')
                         self.send_data(200, codex.session(sid, before, after))
-                elif parsed.path in ('/', '/app.js', '/panels.js', '/now.js', '/style.css'):
+                elif parsed.path in ('/', '/app.js', '/panels.js', '/now.js', '/activity.js', '/style.css'):
                     name = 'index.html' if parsed.path == '/' else parsed.path[1:]
                     ct = 'text/javascript; charset=utf-8' if name.endswith('.js') else {'index.html': 'text/html; charset=utf-8', 'style.css': 'text/css; charset=utf-8'}[name]
                     body = (ROOT / 'web' / name).read_bytes()

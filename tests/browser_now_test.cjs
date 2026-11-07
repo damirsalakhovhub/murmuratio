@@ -82,14 +82,16 @@ const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import
     const value = (id, selector) => page.$eval(`[data-agent-id="${id}"] ${selector}`, e => e.textContent);
     const parts = (id, selector) => page.$$eval(`[data-agent-id="${id}"] ${selector} > span`, es => es.map(e => e.textContent));
     const ids = project => page.$$eval(`[data-project="${project}"] .now-card`, es => es.map(e => e.dataset.agentId));
-    assert.deepEqual(await parts('atlas', '.now-time'), ['Last reply 18:31']);
+    assert.deepEqual(await parts('atlas', '.now-time'), ['18:31']);
     assert.deepEqual(await parts('gameplay', '.now-time'), ['08:34', '6′']);
     assert.deepEqual(await parts('icons', '.now-time'), ['17:51', '27′']);
-    assert.equal(await value('northstar', '.now-time'), 'Last reply 18:09');
+    assert.equal(await value('northstar', '.now-time'), '18:09');
     assert.equal(await value('gameplay', '.now-model'), 'GPT-6.1 Terra');
     assert.equal(await value('atlas', '.now-model'), 'Opus 5.5');
     for (const [id, percent, level] of [['gameplay', '49%', 'low'], ['inspector', '50%', 'mid'], ['arts', '80%', 'high']]) {
-      assert.equal(await value(id, '.now-context'), percent);
+      // Ring only on every card; the value lives in the label and tooltip.
+      assert.equal(await value(id, '.now-context'), '');
+      assert.equal(await page.$eval(`[data-agent-id="${id}"] .now-context`, e => e.getAttribute('aria-label')), `Context window ${percent} used`);
       assert.equal(await page.$eval(`[data-agent-id="${id}"] .now-context`, e => e.dataset.level), level);
     }
     assert.equal(await page.$eval('[data-agent-id="atlas"] .now-context', e => e.hidden), true);
@@ -186,6 +188,27 @@ const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import
     // Scenarios recompute the verdicts and the answers.
     const facts = () => page.$$eval('.now-forecast-fact-label', es => es.map(e => e.textContent));
     assert.deepEqual(await facts(), ['Work split today', 'Codex credits', 'To last until reset', 'Work hours']);
+    // Charts go away from the header toggle and come back; the choice survives a reload.
+    await page.click('#charts-toggle');
+    // The block folds with an animation first, then leaves the layout.
+    assert.equal(await page.$eval('#now-forecast', e => e.getAnimations().length), 1);
+    await page.waitForFunction(() => document.getElementById('now-forecast').hidden);
+    assert.equal(await page.$eval('#charts-toggle', e => e.getAttribute('aria-pressed')), 'false');
+    await page.click('#charts-toggle');
+    await page.waitForSelector('#now-forecast:not([hidden]) .now-forecast-chart');
+    await page.waitForFunction(() => !document.getElementById('now-forecast').getAnimations().length);
+    // A column hides from its header and returns from the Columns menu.
+    const firstProject = await page.$eval('.now-project', e => e.dataset.project);
+    await page.$eval('.now-project .now-column-hide', e => e.click());
+    assert.equal(await page.$eval(`[data-project="${firstProject}"]`, e => e.hidden), true);
+    assert.equal(await page.$eval('#columns-hidden-count', e => e.textContent), '1 hidden');
+    await page.click('#columns-toggle');
+    await page.waitForSelector('#columns-menu:not([hidden])');
+    await page.$$eval('#columns-menu label', (ls, name) => ls.find(l => l.textContent.startsWith(name)).querySelector('input').click(), firstProject);
+    assert.equal(await page.$eval(`[data-project="${firstProject}"]`, e => e.hidden), false);
+    assert.equal(await page.$eval('#columns-hidden-count', e => e.hidden), true);
+    await page.keyboard.press('Escape');
+    assert.equal(await page.$eval('#columns-menu', e => e.hidden), true);
     const chartHeight = await page.$eval('.now-forecast-chart', e => e.getBoundingClientRect().height);
     await page.click('.now-forecast-scenario[data-scenario="claude"]');
     await page.waitForFunction(() => document.querySelector('.now-forecast-scenario[data-scenario="claude"]').getAttribute('aria-checked') === 'true');
@@ -382,6 +405,60 @@ const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import
     payload = {now, agents: stopped, completed: []};
     await page.waitForSelector('[data-agent-id="crashed"]');
     for (const agent of stopped) assert.deepEqual(await parts(agent.id, '.now-time'), ['08:00', '2′']);
+
+    // R2, T1, S1 and R4: the saved evidence remains visible in the existing card and gauge vocabulary.
+    const unknown = item('unknown', 'Evidence', {status: 'unknown', seconds: null});
+    const quiet = item('quiet', 'Evidence', {quiet: true, seconds: null, current_action: ''});
+    payload = {now, agents: [unknown, quiet], completed: [],
+      limits: {codex: [{window_minutes: 10080, used_percent: 12, resets_at: now + 3600}],
+        claude: [{window_minutes: 300, used_percent: 10, resets_at: now + 3600}]},
+      sources: {codex_limits: {status: 'stale'}, claude_limits: {status: 'unavailable', stale: true},
+        codex_sessions: {status: 'unavailable', reason: 'permission_denied'}}};
+    await page.waitForSelector('[data-agent-id="unknown"]');
+    assert.equal(await value('unknown', '.now-word'), 'Unknown', 'R2 unknown status is visible');
+    assert.deepEqual(await parts('unknown', '.now-time'), ['18:00'], 'T1 unknown duration is omitted');
+    assert.match(await value('quiet', '.now-current'), /Quiet/, 'S1 quiet work is labelled');
+    assert.equal(await page.$eval('[data-agent-id="quiet"] .now-current', e => getComputedStyle(e).display !== 'none' && e.getBoundingClientRect().width > 0), true);
+    assert.match(await page.$eval('[data-tool="codex"]', e => e.textContent), /stale/i, 'R4 stale quota is labelled');
+    assert.match(await page.$eval('[data-tool="claude"]', e => e.textContent), /stale/i, 'R4 stale fallback is labelled');
+    assert.match(await page.$eval('#now-error', e => e.textContent), /Codex session logs can't be read: permission denied/);
+    for (const theme of ['light', 'dark']) {
+      await page.emulateMediaFeatures([{name: 'prefers-color-scheme', value: theme}]);
+      for (const [width, dpr] of [[1280, 1], [390, 2]]) {
+        await page.setViewport({width, height: 1000, deviceScaleFactor: dpr});
+        assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${width}px source states reflow`);
+        await page.screenshot({path: path.join(artifacts, `source-states-${theme}-${width}.png`), fullPage: true});
+      }
+    }
+
+    // R3: a failing source cannot be mistaken for an empty board.
+    payload = {now, agents: [], completed: [], sources: {codex_sessions: {status: 'unsupported'}}};
+    await page.waitForFunction(() => !document.querySelector('#now-error').hidden && /format not recognized/i.test(document.querySelector('#now-error').textContent));
+    assert.equal(await page.$eval('.now-empty', e => e.hidden), true, 'R3 source problem is not an empty board');
+    payload = {now, agents: [], completed: [], sources: {codex_sessions: {status: 'absent'}}};
+    await page.waitForFunction(() => !document.querySelector('.now-empty').hidden);
+    assert.equal(await page.$eval('#now-error', e => e.hidden), true, 'R3 absent optional source is normal');
+
+    // S5/T2: use the server's calendar even if the browser uses another timezone.
+    await page.emulateTimezone('America/Los_Angeles');
+    const midnight = Date.UTC(2026, 10, 7) / 1000;
+    payload = {now: midnight + 60, local_day: {start: midnight, end: midnight + 86400}, agents: [],
+      completed: [item('midnight', 'Calendar', {status: 'done', completed: true, ended: midnight - 300})]};
+    await page.waitForSelector('[data-agent-id="midnight"]');
+    assert.match(await page.$eval('#now-summary', e => e.textContent), /0 done today/, 'T2 day uses server calendar');
+
+    // R8: paused rendering and a disconnected server are both visible, then recover to the newest snapshot.
+    await page.hover('[data-agent-id="midnight"]');
+    payload = {...payload, agents: [item('latest', 'Calendar')], completed: []};
+    await page.waitForFunction(() => /paused/i.test(document.querySelector('#now-error').textContent) && !document.querySelector('#now-error').hidden, {timeout: 16000});
+    fail = true;
+    await page.waitForFunction(() => /Reconnecting/.test(document.querySelector('#now-error').textContent));
+    assert.match(await page.$eval('#now-error', e => e.textContent), /paused/i, 'R8 pause and disconnect remain visible together');
+    await page.mouse.move(0, 0);
+    assert.equal(await page.$eval('#now-error', e => e.hidden), false, 'R8 disconnect remains visible while resuming');
+    fail = false;
+    await page.waitForSelector('[data-agent-id="latest"]');
+    await page.waitForSelector('#now-error[hidden]');
     assert.deepEqual(errors, []);
     console.log('Final Board browser checks passed: fixture project parents, SVG tree elbows, exact time strings, stable ordering, in-place completion and source removal, pointer + selection pause/latest queue, English UI, no report/context dumps, safe text, Codex links, keyboard tabs, 1280/780/390/320px DPR1/2, 125% scale, light/dark, reduced motion, reconnect.');
   } finally {

@@ -145,8 +145,8 @@ class NowTests(unittest.TestCase):
                 agent = agents[agent['parent_id']]
         self.assertEqual(agents['claude:orphan']['status'], 'done')
 
-    def test_hidden_starter_children_join_project_orchestrator_and_approval_wait_is_blocked(self):
-        # The old orchestrator waits on an approval prompt for 15 minutes; its chats still hang off the board root.
+    def test_handoff_redirects_children_from_old_orchestrator(self):
+        # The old orchestrator is quiet; its successor retains the child sessions.
         self.claude('old', stop='tool_use', modified=self.now - 900)
         self.desktop('old', 'local_old', title='Northstar orchestrator')
         self.claude('new')
@@ -158,11 +158,11 @@ class NowTests(unittest.TestCase):
         self.assertEqual([a['id'] for a in roots], ['claude:new'])
         self.assertEqual(agents['claude:task']['parent_id'], 'claude:new')
 
-    def test_board_keeps_today_running_and_orchestrators(self):
+    def test_S5_board_keeps_running_work_and_recent_finished_turns(self):
         midnight = datetime.fromtimestamp(self.now).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-        self.claude('orch', modified=midnight - 7200)
+        self.claude('orch')
         self.desktop('orch', 'local_orch')
-        self.claude('today-worker', modified=midnight + 60)
+        self.claude('today-worker', modified=self.now - 60)
         self.desktop('today-worker', 'local_today', spawnedFrom={'sessionId': 'local_orch'})
         real_now, self.now = self.now, midnight - 10
         self.claude('yesterday-worker', modified=midnight - 60)
@@ -281,7 +281,7 @@ class NowTests(unittest.TestCase):
         self.assertEqual(agent['turn_started'], self.now - 10)
         self.assertEqual(agent['started'], self.now - 100)
 
-    def test_unarchived_orchestrator_and_long_running_work_survive_age_cutoffs(self):
+    def test_S3_old_orchestrator_waits_until_archived_while_live_codex_writer_survives(self):
         real_now = self.now
         self.now -= 5 * 86400
         self.claude('orch')
@@ -466,13 +466,15 @@ class NowTests(unittest.TestCase):
 
     def test_claude_activity_and_waiting(self):
         for age, last, expected in [(10, 'tool_use', 'working'), (10, 'end_turn', 'waiting'),
-                                     (120, 'user', 'working'), (121, 'tool_use', None),
-                                     (86399, 'end_turn', 'waiting'), (86400, 'end_turn', None)]:
+                                     (120, 'user', 'working'), (121, 'tool_use', 'working'),
+                                     (86399, 'end_turn', 'waiting'), (86400, 'end_turn', 'waiting'),
+                                     (86400, 'tool_use', None), (10, 'stop_sequence', 'waiting')]:
             with self.subTest(age=age, last=last):
                 self.assertEqual(claude_status(self.now - age, last, self.now), expected)
 
     def test_claude_working_time_survives_notifications_and_stops_at_reply(self):
         path = self.claude(stop='tool_use')
+        self.desktop('session', 'local_session')
         self.source.state()  # Exercise the incremental summary too.
         self.append(path, dict(type='user', timestamp=self.now - 5, isMeta=True,
                                message={'content': 'A later task notification'}))
@@ -486,9 +488,10 @@ class NowTests(unittest.TestCase):
 
     def test_spawned_idle_session_is_done_but_top_level_waits(self):
         self.claude('top')
+        self.desktop('top', 'local_top')
         worker = self.claude('worker')
         desktop = self.home / 'Library/Application Support/Claude/claude-code-sessions/a/b/local_worker.json'
-        desktop.parent.mkdir(parents=True)
+        desktop.parent.mkdir(parents=True, exist_ok=True)
         desktop.write_text(json.dumps({'cliSessionId': 'worker', 'spawnedFrom': {'sessionId': 'local_parent', 'sideSession': True}}))
         agents = {a['id']: a for a in self.source.state()['agents']}
         self.assertEqual(agents['claude:top']['status'], 'waiting')
@@ -597,8 +600,9 @@ class NowTests(unittest.TestCase):
         desktop.parent.mkdir(parents=True)
         desktop.write_text(json.dumps({'cliSessionId': 'archived', 'isArchived': True}))
         agents = self.source.state()['agents']
-        self.assertEqual([a['id'] for a in agents], ['claude:working', 'claude:waiting'])
-        self.assertEqual(agents[0]['project'], 'Atlas')
+        self.assertEqual({a['id'] for a in agents}, {'claude:working', 'claude:idle', 'claude:waiting'})
+        self.assertEqual(next(a for a in agents if a['id'] == 'claude:working')['project'], 'Atlas')
+        self.assertTrue(next(a for a in agents if a['id'] == 'claude:idle')['quiet'])
 
     def test_incremental_partial_malformed_and_truncated_records(self):
         events = self.home / 'events.jsonl'

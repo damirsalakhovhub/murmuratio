@@ -74,14 +74,19 @@ try {
  assert.equal(await page.$eval('[data-metric=compaction]',x=>x.textContent.includes('Total compactions 1')),true);
  assert.equal(await page.evaluate(()=>window.pwned),undefined);
  assert.equal(await page.$$eval('#analysis > .metric-block',x=>x.length),4);
- assert.equal(await page.$eval('#event-log',x=>x.open),false);
+ assert.equal(await page.$eval('#event-log',x=>x.open),true);
  assert.equal(await page.$('#chat-tokens'),null);
- await page.click('#event-log-summary');
- assert.equal(await page.$$eval('.packet',x=>x.length),120);
- await page.$$eval('.packet button',els=>els.find(x=>x.textContent==='Show full text').click());
- await page.waitForFunction(()=>[...document.querySelectorAll('.packet pre')].some(x=>x.textContent.endsWith('END')));
+ assert.equal(await page.$eval('#event-log-summary',x=>x.textContent),'Activity');
+ // Raw model records feed the turn's usage line instead of their own rows.
+ assert.equal(await page.$$eval('.turn-usage',x=>x.length),1);
+ assert.equal(await page.$$eval('.step',x=>x.length),0,'work stays folded until opened');
+ const openAll=()=>page.$$eval('.work-fold, .step-fold',els=>els.forEach(x=>x.open=true));
+ await openAll();await openAll();
+ const steps=await page.$$eval('.step',x=>x.length);assert.ok(steps>0);
+ await page.$$eval('.step-body button',els=>els.find(x=>x.textContent==='Show full text').click());
+ await page.waitForFunction(()=>[...document.querySelectorAll('.step-output')].some(x=>x.textContent.endsWith('END')));
  const before=await page.$$eval('.packet',x=>x.length);await page.click('#older-events');await page.waitForFunction(n=>document.querySelectorAll('.packet').length>n,{},before);
- assert.equal(await page.$$eval('.packet',x=>x.length),240);
+ assert.equal(await page.$$eval('.turn',x=>x.length),1);
  await page.$$eval('#analysis > .metric-block > .analysis-fold',els=>els.forEach(x=>x.open=true));
  await page.screenshot({path:path.join(artifacts,'codex-wide.png'),fullPage:true});
  await page.reload({waitUntil:'networkidle0'});await page.waitForSelector('#analysis:not([hidden])');
@@ -125,9 +130,8 @@ try {
  await noReset.waitForSelector('#analysis:not([hidden])');
  assert.equal(await noReset.$eval('#reset-context',e=>e.hidden),true);
  assert.equal(resetRequests,0,'disabled reset never polls the backend');
- assert.deepEqual(await noReset.$$eval('.packet-label',es=>es.map(e=>e.textContent)),['← Tool error','← Tool error','← Tool result']);
- assert.equal(await noReset.$$eval('.packet-label.error',es=>es.length),2);
- assert.deepEqual(await noReset.$$eval('.answers > summary',es=>es.map(e=>e.textContent)),['Reply contains an error','Reply contains an error','Reply']);
+ assert.deepEqual(await noReset.$$eval('.turn',es=>es.map(e=>e.classList.contains('failed'))),[true,true,false]);
+ assert.deepEqual(await noReset.$$eval('.work-meta',es=>es.map(e=>e.textContent)),['1 failed','1 failed','']);
  await noReset.close();
  assert.deepEqual(errors,[]);
  console.log('PASS: 2000 chats, bounded list, project search, archive/agents, sidebar width persistence, source tabs/keyboard, context/cache/compaction, pagination, safe text, wide/narrow DPR1/2, no JS errors');

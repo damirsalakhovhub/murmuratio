@@ -20,6 +20,16 @@ Try it without installing: `./murmuratio run --demo` shows sample data. `./murmu
 
 Keep the cloned folder while installed. If `~/.claude` exists, the installer backs up Claude Code settings and wraps the existing status line; otherwise it skips that step. Run install again after adding Claude to enable it.
 
+Before restarting a running board after a code change, compare the checkout to the live board:
+
+```sh
+./murmuratio check-update --url http://127.0.0.1:8765
+```
+
+Restart only if the command exits successfully. Use the running board's local URL and, if applicable, its `--config` and `--codex-home` values. The check reports changes to visible card IDs, projects, statuses and orchestrator roles. Unexplained losses, changed statuses or roles, unhealthy sources and an unstable live board block the restart. Retry if the live board changes while comparing. Confirmed archived sessions, hidden chats and expired workers may leave. No snapshot files are written, and task text is not printed.
+
+The source files can change during comparison: two matching live snapshots reduce this risk but do not freeze them. The check compares API data and the board's card-retention rules; it does not verify browser rendering.
+
 ## What it reads, writes and sends
 
 Reads by default:
@@ -47,11 +57,12 @@ Sends: nothing during normal use. The HTTP server listens only on `127.0.0.1` an
 
 ## Accuracy limits
 
-- Codex discovery covers saved sessions modified in the last 24 hours. Ephemeral sessions without saved rollouts are invisible.
+- Claude native subagents are included in their parent turn and do not have separate cards.
+- Codex discovery covers saved sessions modified in the last 24 hours. A quiet session may disappear after that even if its rollout is still open for writing; a new saved event makes it discoverable again. Ephemeral sessions without saved rollouts are invisible.
 - Launch classification uses `session_meta.source` (`exec` or a `subagent` object for workers; `cli`, `tui` or `vscode` for interactive chats), with `originator` as a fallback. A Claude parent link or wrapper record identifies a worker regardless of the interactive launch metadata. Finished cards leave the board after 30 minutes; their recent history still contributes to today's totals.
 - Claude-to-Codex parent links use recorded identifiers when available. Otherwise, a unique working-directory and launch-time match within about two minutes is marked inferred and may be wrong. Indirect or delayed launches may be missed.
-- Very large records may be read partially or skipped. Codex board reads skip most individual records larger than 512 KiB; oversized metadata and turn boundaries receive limited handling.
-- Status and context are inferred from saved data. Usage-limit numbers are snapshots and may be stale.
+- Very large records may be read partially or skipped. Codex board reads buffer records up to 8 MiB; larger turn boundaries receive limited handling.
+- Status and context are inferred from saved data. Quiet unfinished Claude turns remain working for up to 24 hours after their last saved activity; silence alone never means approval is needed. Usage-limit numbers are snapshots and may be stale.
 - A completed wrapper record wins over unfinished rollout state. Codex threads with no rollout writer and no activity for over 30 minutes move to completed as crashed; a live wrapper process keeps its current status. If the process check fails, the board preserves the inferred status.
 - Only macOS is supported.
 

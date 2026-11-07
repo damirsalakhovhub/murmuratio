@@ -42,22 +42,10 @@
   if (!groupPreferences || Array.isArray(groupPreferences) || typeof groupPreferences !== 'object') groupPreferences={};
   let sidebarSearching = false;
   const turns = new Map();
-  const packets = new Map();
   const unread = new Set();
-  const pretty = value => typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-  const parse = value => { try { return JSON.parse(value); } catch { return value; } };
-  // Accept legacy Russian error statuses from saved event data.
-  const isErrorStatus = status => status === 'Error' || status === 'Ошибка';
   const numbers = new Intl.NumberFormat('en-US');
   const isCount = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
   const count = value => isCount(value) ? numbers.format(value) : 'no data';
-  function tokenText(usage) {
-    const u = usage || {};
-    if (![u.input_tokens, u.output_tokens, u.total_tokens].some(isCount)) return 'Usage not available yet';
-    const directions = `→ ${count(u.input_tokens)} ← ${count(u.output_tokens)}`;
-    return `${directions} tokens`;
-  }
-
   const panels = window.createInspectorPanels({node, count});
 
   async function api(path, options = {}) {
@@ -95,6 +83,13 @@
     group.details.open=searching ? group.searchOpen : group.open;
     return group;
   }
+  // Orchestrator-started chats carry a rules preamble as their name; the Board's task title reads better.
+  const preamble = /^(#\s.*\bcard\b|You are an? .*(worker|orchestrator)|Read-only audit for the Claude orchestrator)/i;
+  const chatName = s => {
+    const first = String(s?.name || '').split('\n').find(line => line.trim())?.trim() || '';
+    return (s?.task && (!first || preamble.test(first))) ? s.task : first || s?.task || 'Untitled';
+  };
+  const sessionName = data => chatName(lastSessions.find(s => s.id === data.session.id) || data.session);
   function renderChats(sessions) {
     lastSessions=sessions;
     const hidden=hiddenChats,showingHidden=$('show-hidden').checked;
@@ -107,7 +102,7 @@
     const projectNames=new Map((lastSidebar.projects||[]).map(p=>[p.id,p.name]));
     const filtered=sessions.filter(s=>hidden.has(s.id)===showingHidden &&
       ((showingHidden || $('show-archive').checked || !s.archived) && (showingHidden || $('show-agents').checked || !s.is_agent) &&
-      (!query || `${s.name} ${s.cwd||''} ${projectNames.get(s.project_id)||''}`.toLocaleLowerCase().includes(query))));
+      (!query || `${chatName(s)} ${s.name} ${s.cwd||''} ${projectNames.get(s.project_id)||''}`.toLocaleLowerCase().includes(query))));
     const ids=new Set(filtered.map(s=>s.id));
     function rowFor(s,placement='default',scope=filtered){
       const key=placement+':'+s.id;let el=chats.get(key);
@@ -126,15 +121,15 @@
         });
         row.append(info,visibility);el._row=row;el._project=project;el._visibility=visibility;
       }
-      const matches=scope.filter(item=>item.name===s.name).map(item=>item.id).sort((a,b)=>String(a).localeCompare(String(b)));
+      const matches=scope.filter(item=>chatName(item)===chatName(s)).map(item=>item.id).sort((a,b)=>String(a).localeCompare(String(b)));
       const suffix=matches.length>1 ? ` (${matches.indexOf(s.id)+1})` : '';
-      text(el,(s.name||'Untitled')+suffix);el.classList.add('codex-chat');
-      el.title=[s.name,s.cwd].filter(Boolean).join(' — ');
+      text(el,chatName(s)+suffix);el.classList.add('codex-chat');
+      el.title=[chatName(s),s.cwd].filter(Boolean).join(' — ');
       if(s.id===selected)el.setAttribute('aria-current','true');else el.removeAttribute('aria-current');
       text(el._project,[s.cwd?.split('/').filter(Boolean).at(-1),s.archived?'Archived':'',s.is_agent?'Subagent':''].filter(Boolean).join(' '));
       el._project.title=s.cwd||'';
       const action=showingHidden?'Unhide':'Hide';el._visibility.title=action;
-      el._visibility.setAttribute('aria-label',`${action} chat “${s.name||'Untitled'}”`);
+      el._visibility.setAttribute('aria-label',`${action} chat “${chatName(s)}”`);
       el._visibility.innerHTML=showingHidden
         ? '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M9 4 4 9l5 5M4 9h10a6 6 0 0 1 0 12"/></svg>'
         : '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m3 3 18 18M10.6 10.6a2 2 0 0 0 2.8 2.8M9.8 5.3C16 3.8 21 12 21 12a18 18 0 0 1-3.3 4M6.3 6.3A19 19 0 0 0 3 12s7 11 14.7 5.7"/></svg>';
@@ -186,100 +181,6 @@
     order($('chat-list'),groups);
     for(const [key,el] of chats)if(!ids.has(el._sessionId))chats.delete(key);
   }
-  function describe(event) {
-    const blocks = event.blocks || [];
-    const raw = blocks.map(b => (b.text || '') + (b.truncated ? `\n\n[First 16,000 characters shown out of ${count(b.characters)}]` : '')).join('\n\n');
-    if (event.kind === 'model_record') {
-      // One usage line per saved model record, not per tool or repeated answer part.
-      return {label: '→ Model request', content: '',
-        tokens: tokenText(event.usage), provenance: 'From saved Codex data'};
-    }
-    if (event.kind === 'tool_call') {
-      const call = parse(raw);
-      return {label: '→ ' + (typeof call === 'object' && call?.name ? call.name : 'Tool'),
-        content: typeof call === 'object' && call ? pretty(call.arguments ?? call) : raw};
-    }
-    if (event.kind === 'tool_result') {
-      const result = parse(raw);
-      const value = result?.value ?? result;
-      const content = Array.isArray(value?.content)
-        ? value.content.map(part => part.type === 'text' ? part.text : pretty(part)).join('\n\n')
-        : pretty(value);
-      return {label: isErrorStatus(event.status) ? '← Tool error' : '← Tool result', content};
-    }
-    const labels = {user: 'You', assistant: '← Model reply', context: '→ Context', error: 'Error',
-      compaction: 'Context compaction', context_reset: 'Context reset', model_change: 'Model changed', notification: 'System event'};
-    return {label: labels[event.kind] || 'Event', content: raw};
-  }
-  function requestDetails(event, details) {
-    const body = node('div', 'request-details-body');
-    const u = event.usage || {};
-    body.append(node('p', '', `Input ${count(u.input_tokens)} cache ${count(u.cache_read_tokens)} output ${count(u.output_tokens)} reasoning ${count(u.reasoning_tokens)}.`));
-    body.append(node('p', '', `Model in turn record: ${event.inference?.requestedModel || 'unknown'}. Model in usage: ${event.inference?.resolvedModel || 'not reported'}.`));
-    body.append(node('p', 'muted', 'Cache is included in input; reasoning is included in output. Saved messages cannot reconstruct the exact network request. See Context composition for large blocks.'));
-    details.append(body);
-  }
-  function packet(event) {
-    const description = describe(event);
-    let view = packets.get(event.id);
-    if (!view) {
-      const root = node('article', 'packet');
-      view = {root, signature: '', body: null}; packets.set(event.id, view);
-    }
-    const signature = JSON.stringify([description, event.kind === 'model_record' ? event.blocks : null]);
-    // Refresh the metadata used on next expansion without duplicating whole histories per call.
-    view.event = event;
-    if (signature === view.signature) return {root: view.root, changed: false};
-    const wasOpen = view.body?.open;
-    const whyOpen = view.why?.open;
-    const long = description.content.length > 900;
-    const heading = node('p', 'packet-label', description.label);
-    const body = node('pre', 'packet-text', description.content);
-    if (event.kind === 'error' || isErrorStatus(event.status)) heading.classList.add('error');
-    view.root.replaceChildren();
-    if (long) {
-      const details = node('details', 'packet-content');
-      const summary = node('summary', '', description.label);
-      if (heading.classList.contains('error')) summary.classList.add('error');
-      details.open = wasOpen ?? false;
-      details.append(summary, body); view.root.append(details); view.body = details;
-    } else {
-      view.root.append(heading);
-      if (description.content) view.root.append(body);
-      view.body = null;
-    }
-    if ((event.blocks || []).some(b=>b.truncated)) {
-      const expand = node('button','control button','Show full text'); expand.type='button';
-      const sid=selected, version=generation;
-      expand.addEventListener('click',async()=>{
-        expand.disabled=true;
-        try {
-          const result=await api('/api/codex/event?id='+encodeURIComponent(sid)+'&event='+encodeURIComponent(event.id));
-          if(version!==generation)return;
-          body.textContent=result.text;expand.remove();
-        } catch {text(expand,'Could not load. Retry');expand.disabled=false;}
-      });
-      view.root.append(expand);
-    }
-    if (description.tokens) {
-      const usage = node('p', 'token-count packet-tokens', `${description.tokens} ${description.provenance}`);
-      usage.title = '→ Model input: all context, including cache. ← Model output. Not the size of a single message or tool result.';
-      view.root.append(usage);
-      const why = node('details', 'request-details');
-      why.append(node('summary', '', 'Where do token counts come from?'));
-      let ready = false;
-      why.addEventListener('toggle', () => {
-        if (why.open && !ready) { requestDetails(view.event, why); ready = true; }
-      });
-      // Late usage updates keep the top-level explanation expanded.
-      if (whyOpen) { requestDetails(event, why); ready = true; }
-      why.open = whyOpen ?? false;
-      view.root.append(why); view.why = why;
-    }
-    view.root.classList.toggle('user-packet', event.kind === 'user');
-    view.signature = signature;
-    return {root: view.root, changed: true};
-  }
   function nearBottom() {
     const feed = $('feed');
     return feed.scrollHeight - feed.scrollTop - feed.clientHeight < 70;
@@ -288,17 +189,46 @@
     $('feed').scrollTop = $('feed').scrollHeight;
     unread.clear(); $('new-events').hidden = true;
   }
+  const activity = window.createActivity({node, count});
+  const ui = {open: new Map(), full: new Map(), load: async eventId => {
+    const id = selected, version = generation;
+    const result = await api('/api/codex/event?id=' + encodeURIComponent(id) + '&event=' + encodeURIComponent(eventId));
+    if (version !== generation) throw new Error('Chat changed');
+    return result.text;
+  }};
+  let lastData = null;
+  const eventText = e => ui.full.get(e.id) ?? (e.blocks || []).map(b => b.text || '').join('\n\n');
+  function renderStatus(data) {
+    const events = data?.events || [];
+    const st = activity.status(events, eventText);
+    const line = $('session-status');
+    line.dataset.state = st.state;
+    const parts = [node('span', 'status-dot'), node('span', 'status-word', st.word)];
+    if (st.detail) parts.push(node('span', 'status-detail', st.detail));
+    line.replaceChildren(...parts);
+    const meta = [], a = data?.analysis || {}, u = a.last_usage || {}, t = data?.session?.totals || {};
+    // Board time format: start and minutes while running, the last event time otherwise.
+    if (Number.isFinite(st.start)) meta.push(activity.clock(st.state === 'running' ? st.start : st.lastTime));
+    if (st.state === 'running' && Number.isFinite(st.start)) meta.push(activity.minutes(Date.now() - st.start));
+    if (isCount(u.input_tokens) && a.context_limit > 0) meta.push(`Context ${Math.round(100 * u.input_tokens / a.context_limit)}%`);
+    if (isCount(t.input_tokens)) meta.push(`${activity.short(t.input_tokens + (t.output_tokens || 0))} tokens`);
+    $('session-meta').replaceChildren(...meta.map(m => node('span', '', m)));
+    $('session-meta').title = st.state === 'running' ? 'Started, working time' : 'Last event';
+    $('session-status').hidden = $('session-meta').hidden = !events.length;
+    return st;
+  }
   function render(data) {
+    lastData = data;
     lastAnalysis = data.analysis;
     $('reset-context').hidden = !modules.context_reset || !selected;
     $('event-log').hidden = false;
     panels.render(data, source);
-    text($('session-title'), data.session.name || 'Untitled');
+    text($('session-title'), sessionName(data));
     $('collapse-all').hidden = false;
     const feed = $('feed');
     const atBottom = nearBottom();
     const top = feed.scrollTop;
-    const anchor = [...feed.querySelectorAll('.packet')].find(el => el.getBoundingClientRect().bottom > feed.getBoundingClientRect().top);
+    const anchor = [...feed.querySelectorAll('.turn')].find(el => el.getBoundingClientRect().bottom > feed.getBoundingClientRect().top);
     const anchorTop = anchor?.getBoundingClientRect().top;
     const grouped = new Map();
     for (const event of data.events || []) {
@@ -306,43 +236,31 @@
       if (!grouped.has(key)) grouped.set(key, []);
       grouped.get(key).push(event);
     }
+    const st = renderStatus(data);
     const nodes = [];
-    const seen = new Set();
-    let changed = false;
+    let changed = false, index = 0;
     for (const [key, events] of grouped) {
+      const last = index === grouped.size - 1;
+      const live = last && st.state === 'running';
+      const signature = JSON.stringify([live, index === 0, events.map(e => [e.id, e.status, e.usage?.input_tokens, e.usage?.output_tokens, ui.full.has(e.id), (e.blocks || []).map(b => (b.text || '').length)])]);
       let turn = turns.get(key);
-      if (!turn) {
-        const root = node('section', 'turn');
-        const user = node('div', 'user-messages');
-        const answers = node('details', 'answers');
-        const summary = node('summary', '', 'Reply');
-        const body = node('div', 'answer-packets');
-        answers.open = !allCollapsed;
-        answers.append(summary, body); root.append(user, answers);
-        turn = {root, user, answers, summary, body}; turns.set(key, turn);
+      if (!turn || turn.signature !== signature) {
+        const root = activity.renderTurn(key, events, ui, {live, collapsed: allCollapsed, first: index === 0,
+          rerender: () => { const t = turns.get(key); if (t) t.signature = ''; if (lastData) render(lastData); }});
+        turn = {root, signature}; turns.set(key, turn); changed = true;
       }
-      const userNodes = [], responseNodes = [];
-      for (const event of events) {
-        seen.add(event.id);
-        const result = packet(event);
-        if (result.changed) { changed = true; unread.add(event.id); }
-        (event.kind === 'user' ? userNodes : responseNodes).push(result.root);
-      }
-      order(turn.user, userNodes); order(turn.body, responseNodes);
-      turn.answers.hidden = !responseNodes.length;
-      const failed = events.some(e => e.kind === 'error' || isErrorStatus(e.status));
-      text(turn.summary, failed ? 'Reply contains an error' : 'Reply');
       nodes.push(turn.root);
+      index++;
     }
     order(feed, nodes);
     for (const key of turns.keys()) if (!grouped.has(key)) turns.delete(key);
-    for (const id of packets.keys()) if (!seen.has(id)) packets.delete(id);
     if (!loaded || atBottom) bottom();
     else {
       feed.scrollTop = anchor?.isConnected ? top + anchor.getBoundingClientRect().top - anchorTop : top;
       if (changed) $('new-events').hidden = false;
     }
-    text($('event-log-summary'), `Chat events ${count(data.event_count)}`);
+    text($('event-log-summary'), 'Activity');
+    text($('event-count'), `${count(data.event_count)} events`);
     loaded = true;
   }
   async function loadSession() {
@@ -353,7 +271,7 @@
       const data = await api('/api/codex/session?id=' + encodeURIComponent(id) + (tail !== null ? '&after='+tail : ''));
       if (version !== generation || id !== selected) return;
       $('session-error').hidden = true;
-      if (sessionRevision === data.revision) { text($('session-title'), data.session.name || 'Untitled'); return; }
+      if (sessionRevision === data.revision) { text($('session-title'), sessionName(data)); if (lastData) renderStatus(lastData); return; }
       // File rewrite/truncation invalidates earlier cached pages.
       if (sessionRevision && (sessionRevision.split(':')[0] !== data.revision.split(':')[0] || Number(sessionRevision.split(':')[1]) > Number(data.revision.split(':')[1]))) { codexEvents.clear(); sessionRevision=null; return loadSession(); }
       const first = !codexEvents.size;
@@ -368,18 +286,29 @@
       text($('session-error'), 'Could not read chat. Reconnecting…'); $('session-error').hidden = false;
     }
   }
+  // On a phone the chat list folds to one line once a chat is open.
+  let drawerOpen = false;
+  function paintDrawer() {
+    const folded = Boolean(selected) && !drawerOpen;
+    document.querySelector('.chats').classList.toggle('folded', folded);
+    $('chats-drawer').setAttribute('aria-expanded', String(!folded));
+    text($('chats-drawer'), folded ? 'All chats' : 'Hide chat list');
+  }
+  $('chats-drawer').addEventListener('click', () => { drawerOpen = !drawerOpen; paintDrawer(); if (drawerOpen) $('chat-search').focus({preventScroll: true}); });
   function select(id) {
+    drawerOpen = false; paintDrawer();
     if (selected === id && loaded) return;
     selected = id; generation++; loaded = false; lastAnalysis = null; save('inspector.selected.' + source, id);
     $('reset-context').hidden = true;
     $('reset-result').hidden = true;
     codexEvents.clear(); nextBefore = null; sessionRevision = null;
     $('analysis').hidden = true; $('older-events').hidden = true;
-    $('event-log').open = false;
+    $('event-log').open = true;
     $('event-log').hidden = true;
-    turns.clear(); packets.clear(); unread.clear(); $('feed').replaceChildren();
+    $('session-status').hidden = $('session-meta').hidden = true; lastData = null;
+    turns.clear(); ui.open.clear(); ui.full.clear(); unread.clear(); $('feed').replaceChildren();
     $('new-events').hidden = true; $('session-error').hidden = true;
-    text($('session-title'), lastSessions.find(s => s.id === id)?.name || 'Chat');
+    text($('session-title'), lastSessions.find(s => s.id === id) ? chatName(lastSessions.find(s => s.id === id)) : 'Chat');
     renderChats(lastSessions); void loadSession(); if (modules.context_reset && source === 'codex' && id) void pollReset();
   }
   async function poll() {
@@ -389,10 +318,13 @@
     try {
       const currentConfig = await api('/api/config');
       if (JSON.stringify(currentConfig) !== configKey) { location.reload(); return; }
-      const state = await api(source === 'now' ? '/api/now' : '/api/codex/state');
+      // The header (totals and limits) is shared, so Codex chats reads the Board data too.
+      const [state, board] = await Promise.all([api(source === 'now' ? '/api/now' : '/api/codex/state'),
+        source === 'now' ? null : api('/api/now').catch(() => null)]);
       if (version !== generation) return;
       $('connection-error').hidden = true;
       if (source === 'now') { nowView.render(state); return; }
+      if (board) nowView.render(board);
       lastSidebar=state.sidebar||{};renderChats(state.sessions || []);
       await loadSession();
       if (modules.context_reset && source === 'codex' && selected) await pollReset();
@@ -405,7 +337,8 @@
   function syncSource() {
     document.body.classList.toggle('now-mode', source === 'now');
     document.documentElement.lang = 'en';
-    document.title = source === 'now' ? 'Murmuratio — Board' : 'Murmuratio';
+    document.title = source === 'now' ? 'Murmuratio — Board' : 'Murmuratio — Codex chats';
+    text($('page-title'), source === 'now' ? 'Agents' : 'Codex chats');
     for (const name of ['now','codex']) {
       const tab = $('tab-'+name);tab.setAttribute('aria-selected', String(name===source)); tab.tabIndex = name===source ? 0 : -1;
     }
@@ -414,12 +347,12 @@
     if (source==='now') return;
     $('workspace').setAttribute('aria-labelledby', 'tab-codex');
     $('reset-context').hidden=!modules.context_reset || !selected || !loaded;
-    $('event-log').open=false;
+    $('event-log').open=true;
   }
   async function switchSource(name) {
     if (source === name || (name === 'codex' && !modules.codex_chats)) return;
     source=name;$('show-hidden').checked=false;save('inspector.source',name);generation++;loaded=false;selected='';
-    chats.clear();lastSessions=[];lastSidebar={};turns.clear();packets.clear();codexEvents.clear();
+    chats.clear();lastSessions=[];lastSidebar={};turns.clear();ui.open.clear();ui.full.clear();codexEvents.clear();lastData=null;
     $('chat-list').replaceChildren();$('feed').replaceChildren();$('analysis').hidden=true;
     $('collapse-all').hidden=true;$('older-events').hidden=true;moreChats.hidden=true;
     $('new-events').hidden=true;$('session-error').hidden=true;syncSource();
@@ -597,12 +530,13 @@
   new ResizeObserver(()=>{ if (!dragging) resizeSidebar(preferredWidth); }).observe(workspace);
   resizeSidebar(preferredWidth);
   $('collapse-all').addEventListener('click', () => {
-    const collapse = [...turns.values()].some(turn => !turn.answers.hidden && turn.answers.open);
+    const folds = [...$('feed').querySelectorAll('.turn-fold')];
+    const collapse = folds.some(d => d.open);
     allCollapsed = collapse; save('inspector.collapsed', String(collapse));
-    for (const turn of turns.values()) turn.answers.open = !collapse;
-    text($('collapse-all'), collapse ? 'Expand all replies' : 'Collapse all replies');
+    for (const d of folds) d.open = !collapse;
+    text($('collapse-all'), collapse ? 'Expand all' : 'Collapse all');
   });
-  text($('collapse-all'), allCollapsed ? 'Expand all replies' : 'Collapse all replies');
+  text($('collapse-all'), allCollapsed ? 'Expand all' : 'Collapse all');
   $('new-events').addEventListener('click', bottom);
   $('feed').addEventListener('scroll', () => { if (nearBottom()) { unread.clear(); $('new-events').hidden = true; } }, {passive: true});
   async function start() {
@@ -612,7 +546,7 @@
     } catch { nowView.error(); setTimeout(start, 3000); return; }
     if (!modules.codex_chats) source = 'now';
     document.querySelector('.source-tabs').hidden = !modules.codex_chats;
-    syncSource(); void poll();
+    syncSource(); paintDrawer(); void poll();
     setInterval(() => { if (!document.hidden) void poll(); }, 3000);
   }
   void start();

@@ -1,10 +1,12 @@
 """Incremental JSONL reading and local status/action interpretation."""
+import hashlib
 import json
 from pathlib import Path
 import re
 from murmuratio_app.common import one_line, timestamp
 
 CODEX_DEAD_SECONDS = 30 * 60
+CLAUDE_TURN_FINISHED = frozenset(('end_turn', 'stop_sequence'))
 
 
 def codex_status(run, now, last_event, alive):
@@ -17,11 +19,9 @@ def codex_status(run, now, last_event, alive):
 
 
 def claude_status(modified, last_turn, now, spawned=False):
-    if now - modified >= 86400:
-        return None
-    if last_turn == 'end_turn':
+    if last_turn in CLAUDE_TURN_FINISHED:
         return 'done' if spawned else 'waiting'
-    return 'working' if now - modified <= 120 else None
+    return 'working' if now - modified < 86400 else None
 
 
 def claude_label(model):
@@ -93,27 +93,69 @@ def current_action(tool, detail='', server=''):
     return clean_action(tool).replace('_', ' ')[:80] or 'Using a tool'
 
 
+class JsonlPrefix:
+    """Detect in-place rewrites before appending to a cached summary."""
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.size = 0
+        self.hash = hashlib.blake2b()
+
+    @staticmethod
+    def _add(stream, digest, size):
+        while size:
+            block = stream.read(min(size, 1024 * 1024))
+            if not block:
+                raise OSError('JSONL file changed while being read')
+            digest.update(block)
+            size -= len(block)
+
+    def matches(self, stream, size):
+        if self.size != size:
+            return False
+        stream.seek(0)
+        digest = hashlib.blake2b()
+        self._add(stream, digest, size)
+        return digest.digest() == self.hash.digest()
+
+    def extend(self, stream, size):
+        if size < self.size:
+            raise OSError('JSONL prefix moved backwards')
+        stream.seek(self.size)
+        digest = self.hash.copy()
+        self._add(stream, digest, size - self.size)
+        self.hash, self.size = digest, size
+
+
 class JsonlSummary:
     """Keep only summary fields, and consume complete appended JSONL records."""
     def __init__(self):
         self.inode = None
         self.offset = 0
         self.modified = None
+        self.size = None
+        self.prefix = JsonlPrefix()
         self.data = {}
         self.malformed = 0
         self.record_types = set()
 
     def refresh(self, path, consume):
         st = path.stat()
-        if (st.st_ino != self.inode or st.st_size < self.offset or
-                (self.malformed and st.st_mtime_ns != self.modified) or
-                (st.st_size == self.offset and st.st_mtime_ns != self.modified)):
-            self.offset = 0
-            self.data = {}
-            self.malformed = 0
-            self.record_types = set()
-        self.inode, self.modified = st.st_ino, st.st_mtime_ns
+        reset = (st.st_ino != self.inode or st.st_size < self.offset or
+                 (self.malformed and st.st_mtime_ns != self.modified) or
+                 (st.st_size == self.offset and st.st_mtime_ns != self.modified))
         with path.open('rb') as stream:
+            if (not reset and st.st_size > self.offset and
+                    (st.st_mtime_ns != self.modified or st.st_size != self.size)):
+                reset = not self.prefix.matches(stream, self.offset)
+            if reset:
+                self.offset = 0
+                self.data = {}
+                self.malformed = 0
+                self.record_types = set()
+                self.prefix.reset()
+            self.inode, self.modified, self.size = st.st_ino, st.st_mtime_ns, st.st_size
             stream.seek(self.offset)
             while True:
                 line = stream.readline()
@@ -137,6 +179,7 @@ class JsonlSummary:
                         self.malformed += 1
                 else:
                     self.malformed += 1
+            self.prefix.extend(stream, self.offset)
         return self.data, st.st_mtime
 
 

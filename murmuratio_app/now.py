@@ -4,7 +4,7 @@ from pathlib import Path
 import threading
 import time
 from murmuratio_app.config import Config
-from murmuratio_app.common import pid_alive
+from murmuratio_app.common import local_day, pid_alive
 from murmuratio_app.grouping import retain_agents, link_parents as group_parents, merge_codex_sources
 from murmuratio_app.history import read_limit_history, limit_history_additions, replace_text
 from murmuratio_app.metrics.quota import quota_routing, week_forecast
@@ -16,6 +16,7 @@ from murmuratio_app.adapters.usage import ClaudeUsageAdapter, CodexMeterAdapter
 from murmuratio_app.adapters.quota_sources import ClaudeLimitsAdapter, CodexLimitsAdapter
 from murmuratio_app.discovery import Discovery
 from murmuratio_app.adapters.shared import JsonlSummary
+from murmuratio_app.adapters.base import read_error_reason
 
 
 def web_build():
@@ -49,16 +50,19 @@ class NowSource:
                                                     has_rollout=self.has_codex_rollout)
         self.codex_board_adapter = CodexBoardAdapter(paths.codex_rollouts, self.project)
         self.claude_limits_adapter = ClaudeLimitsAdapter(paths.claude_limits, paths.claude_limits_legacy, clock)
-        self.codex_limits_adapter = CodexLimitsAdapter(paths.codex_rollouts)
+        self.codex_limits_adapter = CodexLimitsAdapter(paths.codex_rollouts, clock)
         self.claude_usage_adapter = ClaudeUsageAdapter(paths.claude_sessions)
         self.codex_meter_adapter = CodexMeterAdapter(paths.codex_rollouts)
         self.source_statuses = {}
+        self.source_reasons = {}
         self.board_by_thread = {}
 
     def _read_adapter(self, adapter, *args):
         result = adapter.read(*args)
         if result.status != 'available' or adapter.name not in self.source_statuses:
             self.source_statuses[adapter.name] = result.status
+            if result.reason:
+                self.source_reasons[adapter.name] = result.reason
         return result.values()
 
     def _isolate(self, name, default, action):
@@ -66,9 +70,10 @@ class NowSource:
             value = action()
             self.source_statuses.setdefault(name, 'available')
             return value
-        except Exception:
+        except Exception as exc:
             # One failing source must not prevent the other sources from rendering.
             self.source_statuses[name] = 'unavailable'
+            self.source_reasons[name] = read_error_reason(exc)
             return default
 
     def _background_usage(self, name, key, now, collect):
@@ -96,14 +101,14 @@ class NowSource:
 
     def _collect_codex_usage(self, now, credits, burn):
         result = self.codex_meter_adapter.read(now, credits, burn)
-        if result.status == 'unavailable' and not result.observations:
+        if result.status in ('absent', 'unavailable') and not result.observations:
             return result.status, None
         value, readings = credit_totals(result.values(), credits)
         return result.status, (value, readings)
 
     def _collect_claude_usage(self, since, desktop, split, burn):
         result = self.claude_usage_adapter.read(since, desktop, burn)
-        if result.status == 'unavailable' and not result.observations:
+        if result.status in ('absent', 'unavailable') and not result.observations:
             return result.status, None
         return result.status, claude_usage_totals(result.values(), since, split)
 
@@ -150,6 +155,12 @@ class NowSource:
     def desktop_sessions(self):
         return {row['cli_session_id']: row for row in self._read_adapter(self.desktop_adapter)}
 
+    def codex_titles(self):
+        try:
+            return self.sanitize(self.wrapper_adapter.titles()) if self.sanitize else self.wrapper_adapter.titles()
+        except Exception:
+            return {}
+
     def run(self, path, now, seen=None):
         return self.wrapper_adapter.run(path, now, seen)
 
@@ -193,6 +204,7 @@ class NowSource:
                 return self.last_snapshot
             now, agents, completed, seen = self.clock(), [], [], set()
             self.source_statuses = {}
+            self.source_reasons = {}
             rollouts = self._isolate('codex_sessions', [], lambda: self._read_adapter(self.codex_board_adapter, now))
             self.board_by_thread = {}
             for agent in rollouts:
@@ -214,6 +226,11 @@ class NowSource:
             hidden_chats = [a for a in linked if a.get('codex_role') == 'chat' and not self.config.show_codex_chats]
             hidden_running = sum(not a.get('completed') and a['status'] in ('working', 'hung') for a in hidden_chats)
             linked = [a for a in linked if a.get('codex_role') != 'chat' or self.config.show_codex_chats]
+            hidden_ids = {a['id'] for a in hidden_chats}
+            for agent in linked:
+                if agent.get('parent_id') in hidden_ids:
+                    agent['parent_id'] = None
+                    agent.pop('link', None)
             agents = retain_agents([a for a in linked if not a.get('completed')], now)
             completed = [a for a in linked if a.get('completed') and (a['kind'] != 'codex'
                          or now - (a.get('ended') or a.get('last_at') or 0) < HISTORY_SECONDS)]
@@ -234,7 +251,8 @@ class NowSource:
             if not modules['codex_credits']:
                 credits = None
             self.forecast = {}
-            routing_limits = limits if self.source_statuses.get('claude_limits') != 'stale' else {**limits, 'claude': []}
+            routing_limits = {kind: [] if getattr(self, kind + '_limits_adapter').stale else windows
+                              for kind, windows in limits.items()}
             routing = self._isolate('quota_history', None, lambda: self.routing(routing_limits, now, credits)) if modules['forecast'] or modules['routing'] or modules['burn_rate'] else None
             forecast = getattr(self, 'forecast', {})
             codex_week = forecast.get('codex')
@@ -253,7 +271,7 @@ class NowSource:
                         worker_share, self.claude_models = snapshot['value']
                         if include_split:
                             claude_week['worker_share'] = worker_share
-            state = {'agents': agents, 'completed': completed, 'now': now, 'limits': limits, 'build': web_build(),
+            state = {'agents': agents, 'completed': completed, 'now': now, 'local_day': local_day(now), 'limits': limits, 'build': web_build(),
                      'codex_chats': {'hidden': len(hidden_chats), 'running': hidden_running}}
             if modules['routing']:
                 state['routing'] = routing
@@ -264,8 +282,17 @@ class NowSource:
             if modules['codex_credits']:
                 state['credits'] = credits
             issues = {name: {'status': status} for name, status in self.source_statuses.items() if status != 'available'}
+            for name, issue in issues.items():
+                if self.source_reasons.get(name):
+                    issue['reason'] = self.source_reasons[name]
             if 'claude_limits' in issues:
                 issues['claude_limits']['age_seconds'] = self.claude_limits_adapter.age_seconds
+                if self.claude_limits_adapter.stale and issues['claude_limits']['status'] != 'stale':
+                    issues['claude_limits']['stale'] = True
+            if 'codex_limits' in issues:
+                issues['codex_limits']['age_seconds'] = self.codex_limits_adapter.age_seconds
+                if self.codex_limits_adapter.stale and issues['codex_limits']['status'] != 'stale':
+                    issues['codex_limits']['stale'] = True
             if issues:
                 state['sources'] = issues
             self.last_snapshot = self.sanitize(state)
