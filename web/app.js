@@ -46,14 +46,16 @@
   const unread = new Set();
   const pretty = value => typeof value === 'string' ? value : JSON.stringify(value, null, 2);
   const parse = value => { try { return JSON.parse(value); } catch { return value; } };
-  const numbers = new Intl.NumberFormat('ru-RU');
+  // Accept legacy Russian error statuses from saved event data.
+  const isErrorStatus = status => status === 'Error' || status === 'Ошибка';
+  const numbers = new Intl.NumberFormat('en-US');
   const isCount = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
-  const count = value => isCount(value) ? numbers.format(value) : 'нет данных';
+  const count = value => isCount(value) ? numbers.format(value) : 'no data';
   function tokenText(usage) {
     const u = usage || {};
-    if (![u.input_tokens, u.output_tokens, u.total_tokens].some(isCount)) return 'Статистика ещё не получена';
+    if (![u.input_tokens, u.output_tokens, u.total_tokens].some(isCount)) return 'Usage not available yet';
     const directions = `→ ${count(u.input_tokens)} ← ${count(u.output_tokens)}`;
-    return `${directions} токенов`;
+    return `${directions} tokens`;
   }
 
   const panels = window.createInspectorPanels({node, count});
@@ -61,7 +63,7 @@
   async function api(path, options = {}) {
     const response = await fetch(path, {cache: 'no-store', credentials: 'same-origin', ...options});
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'Источник недоступен');
+    if (!response.ok) throw new Error(data.error || 'Source unavailable');
     return data;
   }
   function order(parent, nodes) {
@@ -96,7 +98,7 @@
   function renderChats(sessions) {
     lastSessions=sessions;
     const hidden=hiddenChats,showingHidden=$('show-hidden').checked;
-    text($('hidden-chats-label'),`Скрытые ${sessions.filter(s=>hidden.has(s.id)).length}`);
+    text($('hidden-chats-label'),`Hidden ${sessions.filter(s=>hidden.has(s.id)).length}`);
     moreChats.hidden=true;
     const query=$('chat-search').value.trim().toLocaleLowerCase();
     const searching=Boolean(query);
@@ -126,13 +128,13 @@
       }
       const matches=scope.filter(item=>item.name===s.name).map(item=>item.id).sort((a,b)=>String(a).localeCompare(String(b)));
       const suffix=matches.length>1 ? ` (${matches.indexOf(s.id)+1})` : '';
-      text(el,(s.name||'Без названия')+suffix);el.classList.add('codex-chat');
+      text(el,(s.name||'Untitled')+suffix);el.classList.add('codex-chat');
       el.title=[s.name,s.cwd].filter(Boolean).join(' — ');
       if(s.id===selected)el.setAttribute('aria-current','true');else el.removeAttribute('aria-current');
-      text(el._project,[s.cwd?.split('/').filter(Boolean).at(-1),s.archived?'Архив':'',s.is_agent?'Субагент':''].filter(Boolean).join(' '));
+      text(el._project,[s.cwd?.split('/').filter(Boolean).at(-1),s.archived?'Archived':'',s.is_agent?'Subagent':''].filter(Boolean).join(' '));
       el._project.title=s.cwd||'';
-      const action=showingHidden?'Вернуть':'Скрыть';el._visibility.title=action;
-      el._visibility.setAttribute('aria-label',`${action} чат «${s.name||'Без названия'}»`);
+      const action=showingHidden?'Unhide':'Hide';el._visibility.title=action;
+      el._visibility.setAttribute('aria-label',`${action} chat “${s.name||'Untitled'}”`);
       el._visibility.innerHTML=showingHidden
         ? '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M9 4 4 9l5 5M4 9h10a6 6 0 0 1 0 12"/></svg>'
         : '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m3 3 18 18M10.6 10.6a2 2 0 0 0 2.8 2.8M9.8 5.3C16 3.8 21 12 21 12a18 18 0 0 1-3.3 4M6.3 6.3A19 19 0 0 0 3 12s7 11 14.7 5.7"/></svg>';
@@ -179,22 +181,22 @@
       moreChats.hidden=!group.details.open || shownRecent.length>=recent.length;
       order(group.body,group.details.open?[...shownRecent.map(s=>rowFor(s,'recent',shownRecent)),moreChats]:[moreChats]);groups.push(group.details);
     }
-    text($('chat-count'),`${filtered.length-(recent.length-shownRecent.length)} из ${filtered.length}`);
-    if(!filtered.length && (searching || showingHidden))groups.push(node('p','muted','Чаты не найдены.'));
+    text($('chat-count'),`${filtered.length-(recent.length-shownRecent.length)} of ${filtered.length}`);
+    if(!filtered.length && (searching || showingHidden))groups.push(node('p','muted','No chats found.'));
     order($('chat-list'),groups);
     for(const [key,el] of chats)if(!ids.has(el._sessionId))chats.delete(key);
   }
   function describe(event) {
     const blocks = event.blocks || [];
-    const raw = blocks.map(b => (b.text || '') + (b.truncated ? `\n\n[Показаны первые 16 000 символов из ${count(b.characters)}]` : '')).join('\n\n');
+    const raw = blocks.map(b => (b.text || '') + (b.truncated ? `\n\n[First 16,000 characters shown out of ${count(b.characters)}]` : '')).join('\n\n');
     if (event.kind === 'model_record') {
       // One usage line per saved model record, not per tool or repeated answer part.
-      return {label: '→ Обращение к модели', content: '',
-        tokens: tokenText(event.usage), provenance: 'По сохранённым данным Codex'};
+      return {label: '→ Model request', content: '',
+        tokens: tokenText(event.usage), provenance: 'From saved Codex data'};
     }
     if (event.kind === 'tool_call') {
       const call = parse(raw);
-      return {label: '→ ' + (typeof call === 'object' && call?.name ? call.name : 'Инструмент'),
+      return {label: '→ ' + (typeof call === 'object' && call?.name ? call.name : 'Tool'),
         content: typeof call === 'object' && call ? pretty(call.arguments ?? call) : raw};
     }
     if (event.kind === 'tool_result') {
@@ -203,18 +205,18 @@
       const content = Array.isArray(value?.content)
         ? value.content.map(part => part.type === 'text' ? part.text : pretty(part)).join('\n\n')
         : pretty(value);
-      return {label: event.status === 'Ошибка' ? '← Ошибка инструмента' : '← Результат инструмента', content};
+      return {label: isErrorStatus(event.status) ? '← Tool error' : '← Tool result', content};
     }
-    const labels = {user: 'Вы', assistant: '← Ответ модели', context: '→ Контекст', error: 'Ошибка',
-      compaction: 'Сжатие контекста', context_reset: 'Сброс контекста', model_change: 'Смена модели', notification: 'Служебное событие'};
-    return {label: labels[event.kind] || 'Событие', content: raw};
+    const labels = {user: 'You', assistant: '← Model reply', context: '→ Context', error: 'Error',
+      compaction: 'Context compaction', context_reset: 'Context reset', model_change: 'Model changed', notification: 'System event'};
+    return {label: labels[event.kind] || 'Event', content: raw};
   }
   function requestDetails(event, details) {
     const body = node('div', 'request-details-body');
     const u = event.usage || {};
-    body.append(node('p', '', `Вход ${count(u.input_tokens)} кеш ${count(u.cache_read_tokens)} выход ${count(u.output_tokens)} reasoning ${count(u.reasoning_tokens)}.`));
-    body.append(node('p', '', `Модель в записи хода: ${event.inference?.requestedModel || 'неизвестна'}. Модель в usage: ${event.inference?.resolvedModel || 'не сообщена'}.`));
-    body.append(node('p', 'muted', 'Кеш включён во вход, reasoning — в выход. Сохранённые сообщения не восстанавливают точный сетевой запрос. Разбор крупных блоков доступен в «Что занимает место».'));
+    body.append(node('p', '', `Input ${count(u.input_tokens)} cache ${count(u.cache_read_tokens)} output ${count(u.output_tokens)} reasoning ${count(u.reasoning_tokens)}.`));
+    body.append(node('p', '', `Model in turn record: ${event.inference?.requestedModel || 'unknown'}. Model in usage: ${event.inference?.resolvedModel || 'not reported'}.`));
+    body.append(node('p', 'muted', 'Cache is included in input; reasoning is included in output. Saved messages cannot reconstruct the exact network request. See Context composition for large blocks.'));
     details.append(body);
   }
   function packet(event) {
@@ -233,7 +235,7 @@
     const long = description.content.length > 900;
     const heading = node('p', 'packet-label', description.label);
     const body = node('pre', 'packet-text', description.content);
-    if (event.kind === 'error' || event.status === 'Ошибка') heading.classList.add('error');
+    if (event.kind === 'error' || isErrorStatus(event.status)) heading.classList.add('error');
     view.root.replaceChildren();
     if (long) {
       const details = node('details', 'packet-content');
@@ -247,7 +249,7 @@
       view.body = null;
     }
     if ((event.blocks || []).some(b=>b.truncated)) {
-      const expand = node('button','control button','Показать полный текст'); expand.type='button';
+      const expand = node('button','control button','Show full text'); expand.type='button';
       const sid=selected, version=generation;
       expand.addEventListener('click',async()=>{
         expand.disabled=true;
@@ -255,16 +257,16 @@
           const result=await api('/api/codex/event?id='+encodeURIComponent(sid)+'&event='+encodeURIComponent(event.id));
           if(version!==generation)return;
           body.textContent=result.text;expand.remove();
-        } catch {text(expand,'Не удалось загрузить. Повторить');expand.disabled=false;}
+        } catch {text(expand,'Could not load. Retry');expand.disabled=false;}
       });
       view.root.append(expand);
     }
     if (description.tokens) {
       const usage = node('p', 'token-count packet-tokens', `${description.tokens} ${description.provenance}`);
-      usage.title = '→ Вход модели: весь контекст, включая кеш. ← Выход модели. Не размер отдельного сообщения или результата инструмента.';
+      usage.title = '→ Model input: all context, including cache. ← Model output. Not the size of a single message or tool result.';
       view.root.append(usage);
       const why = node('details', 'request-details');
-      why.append(node('summary', '', 'Откуда токены?'));
+      why.append(node('summary', '', 'Where do token counts come from?'));
       let ready = false;
       why.addEventListener('toggle', () => {
         if (why.open && !ready) { requestDetails(view.event, why); ready = true; }
@@ -291,7 +293,7 @@
     $('reset-context').hidden = !modules.context_reset || !selected;
     $('event-log').hidden = false;
     panels.render(data, source);
-    text($('session-title'), data.session.name || 'Без названия');
+    text($('session-title'), data.session.name || 'Untitled');
     $('collapse-all').hidden = false;
     const feed = $('feed');
     const atBottom = nearBottom();
@@ -313,7 +315,7 @@
         const root = node('section', 'turn');
         const user = node('div', 'user-messages');
         const answers = node('details', 'answers');
-        const summary = node('summary', '', 'Ответ');
+        const summary = node('summary', '', 'Reply');
         const body = node('div', 'answer-packets');
         answers.open = !allCollapsed;
         answers.append(summary, body); root.append(user, answers);
@@ -328,8 +330,8 @@
       }
       order(turn.user, userNodes); order(turn.body, responseNodes);
       turn.answers.hidden = !responseNodes.length;
-      const failed = events.some(e => e.kind === 'error' || e.status === 'Ошибка');
-      text(turn.summary, failed ? 'Ответ есть ошибка' : 'Ответ');
+      const failed = events.some(e => e.kind === 'error' || isErrorStatus(e.status));
+      text(turn.summary, failed ? 'Reply contains an error' : 'Reply');
       nodes.push(turn.root);
     }
     order(feed, nodes);
@@ -340,7 +342,7 @@
       feed.scrollTop = anchor?.isConnected ? top + anchor.getBoundingClientRect().top - anchorTop : top;
       if (changed) $('new-events').hidden = false;
     }
-    text($('event-log-summary'), `События чата ${count(data.event_count)}`);
+    text($('event-log-summary'), `Chat events ${count(data.event_count)}`);
     loaded = true;
   }
   async function loadSession() {
@@ -351,7 +353,7 @@
       const data = await api('/api/codex/session?id=' + encodeURIComponent(id) + (tail !== null ? '&after='+tail : ''));
       if (version !== generation || id !== selected) return;
       $('session-error').hidden = true;
-      if (sessionRevision === data.revision) { text($('session-title'), data.session.name || 'Без названия'); return; }
+      if (sessionRevision === data.revision) { text($('session-title'), data.session.name || 'Untitled'); return; }
       // File rewrite/truncation invalidates earlier cached pages.
       if (sessionRevision && (sessionRevision.split(':')[0] !== data.revision.split(':')[0] || Number(sessionRevision.split(':')[1]) > Number(data.revision.split(':')[1]))) { codexEvents.clear(); sessionRevision=null; return loadSession(); }
       const first = !codexEvents.size;
@@ -363,7 +365,7 @@
       render(data);
     } catch {
       if (version !== generation) return;
-      text($('session-error'), 'Не удалось прочитать чат. Повторяем подключение…'); $('session-error').hidden = false;
+      text($('session-error'), 'Could not read chat. Reconnecting…'); $('session-error').hidden = false;
     }
   }
   function select(id) {
@@ -377,7 +379,7 @@
     $('event-log').hidden = true;
     turns.clear(); packets.clear(); unread.clear(); $('feed').replaceChildren();
     $('new-events').hidden = true; $('session-error').hidden = true;
-    text($('session-title'), lastSessions.find(s => s.id === id)?.name || 'Чат');
+    text($('session-title'), lastSessions.find(s => s.id === id)?.name || 'Chat');
     renderChats(lastSessions); void loadSession(); if (modules.context_reset && source === 'codex' && id) void pollReset();
   }
   async function poll() {
@@ -397,12 +399,12 @@
     } catch {
       if (version !== generation) return;
       if (source === 'now') { nowView.error(); return; }
-      text($('connection-error'), 'Нет связи с источником. Повторяем подключение…'); $('connection-error').hidden = false;
+      text($('connection-error'), 'Source disconnected. Reconnecting…'); $('connection-error').hidden = false;
     } finally { busy = false; }
   }
   function syncSource() {
     document.body.classList.toggle('now-mode', source === 'now');
-    document.documentElement.lang = source === 'now' ? 'en' : 'ru';
+    document.documentElement.lang = 'en';
     document.title = source === 'now' ? 'Murmuratio — Board' : 'Murmuratio';
     for (const name of ['now','codex']) {
       const tab = $('tab-'+name);tab.setAttribute('aria-selected', String(name===source)); tab.tabIndex = name===source ? 0 : -1;
@@ -423,7 +425,7 @@
     $('new-events').hidden=true;$('session-error').hidden=true;syncSource();
     if (source==='now') { void poll(); return; }
     select(read('inspector.selected.'+source));
-    text($('session-title'), selected ? 'Загрузка…' : 'Выберите чат');
+    text($('session-title'), selected ? 'Loading…' : 'Select a chat');
     void poll();
   }
   function renderResetResult(job) {
@@ -434,29 +436,29 @@
     line.classList.remove('error');
     if (job.state === 'running') {
       text(line, job.stage + '…');
-      text(note, 'Не открывайте Codex до окончания операции.');
+      text(note, 'Keep Codex closed until the operation finishes.');
       return;
     }
     if (job.reset_applied === true && job.before?.context_limit > 0 && isCount(job.before?.input_tokens)) {
       if (!Number.isInteger(job.reset_event_index)) {
-        line.classList.add('error');text(line,'Новое окно создано, но сравнение недоступно');
-        text(note,[job.error,job.restore_error,job.storage_error].filter(Boolean).join(' ') || 'Проверьте состояние чата в Codex.');
+        line.classList.add('error');text(line,'New window created, but comparison unavailable');
+        text(note,[job.error,job.restore_error,job.storage_error].filter(Boolean).join(' ') || 'Check chat status in Codex.');
         return;
       }
       const before=job.before, marker=(lastAnalysis?.compactions||[]).find(c=>c.mode==='reset' && c.event_index===job.reset_event_index);
       const after=marker?.after_input, limit=marker?.after_limit;
-      const percent=(n,total)=>new Intl.NumberFormat('ru-RU',{maximumFractionDigits:1}).format(100*n/total)+'%';
-      const original=`${count(before.input_tokens)} токенов ${percent(before.input_tokens,before.context_limit)}`;
+      const percent=(n,total)=>new Intl.NumberFormat('en-US',{maximumFractionDigits:1}).format(100*n/total)+'%';
+      const original=`${count(before.input_tokens)} tokens ${percent(before.input_tokens,before.context_limit)}`;
       if (!isCount(after) || !(limit > 0)) {
-        text(line, `До: ${original} После: ждём запрос`);
-        text(note, 'Откройте Codex и отправьте тот же короткий вопрос на прежней модели без инструментов.');
+        text(line, `Before: ${original} After: waiting for a request`);
+        text(note, 'Open Codex and send the same short question on the same model without tools.');
       } else if (before.model===marker.after_model && before.context_limit===limit) {
         const delta=after-before.input_tokens;
-        text(line, `${count(before.input_tokens)} → ${count(after)} токенов ${percent(before.input_tokens,limit)} → ${percent(after,limit)} окна ${delta>0?'+':'−'}${count(Math.abs(delta))}`);
-        text(note, 'Первый запрос после смены окна. Для сравнения вопрос и инструменты должны быть одинаковыми.');
+        text(line, `${count(before.input_tokens)} → ${count(after)} tokens ${percent(before.input_tokens,limit)} → ${percent(after,limit)} of window ${delta>0?'+':'−'}${count(Math.abs(delta))}`);
+        text(note, 'First request after the window change. Use the same question and tools to compare.');
       } else {
-        text(line, `До: ${original} После: ${count(after)} токенов ${percent(after,limit)}`);
-        text(note, 'Модель или размер окна изменились; разницу напрямую сравнивать нельзя.');
+        text(line, `Before: ${original} After: ${count(after)} tokens ${percent(after,limit)}`);
+        text(note, 'The model or window size changed; the difference cannot be compared directly.');
       }
       if (job.error || job.restore_error || job.storage_error) {
         line.classList.add('error');text(note,[job.error,job.restore_error,job.storage_error].filter(Boolean).join(' '));
@@ -465,16 +467,16 @@
     }
     if (job.before && job.after && isCount(job.context_limit) && job.context_limit > 0) {
       const before=job.before.input_tokens, after=job.after.input_tokens;
-      const percent=n=>new Intl.NumberFormat('ru-RU',{maximumFractionDigits:1}).format(100*n/job.context_limit)+'%';
+      const percent=n=>new Intl.NumberFormat('en-US',{maximumFractionDigits:1}).format(100*n/job.context_limit)+'%';
       const delta=after-before;
-      text(line, `Astra ${count(before)} → ${count(after)} токенов ${percent(before)} → ${percent(after)} окна ${delta>0?'+':'−'}${count(Math.abs(delta))}`);
-      text(note, 'Одинаковые контрольные запросы без вызова инструментов. Состав инструментов и рабочая модель могут отличаться.');
+      text(line, `Astra ${count(before)} → ${count(after)} tokens ${percent(before)} → ${percent(after)} of window ${delta>0?'+':'−'}${count(Math.abs(delta))}`);
+      text(note, 'Identical test requests without tool calls. Available tools and the working model may differ.');
       if (job.restore_error) { line.classList.add('error'); text(note, job.restore_error); }
       return;
     }
     line.classList.add('error');
-    text(line, job.reset_applied === true ? 'Новое окно создано, замер не завершён' : job.reset_applied === null ? 'Результат операции неизвестен' : 'Сброс не выполнен');
-    text(note, [job.error,job.restore_error,job.storage_error].filter(Boolean).join(' ') || 'Проверьте состояние чата в Codex.');
+    text(line, job.reset_applied === true ? 'New window created, measurement incomplete' : job.reset_applied === null ? 'Operation result unknown' : 'Reset not applied');
+    text(note, [job.error,job.restore_error,job.storage_error].filter(Boolean).join(' ') || 'Check chat status in Codex.');
   }
   async function pollReset() {
     if (!modules.context_reset || source !== 'codex' || !selected) return;
@@ -484,16 +486,16 @@
       if (id!==selected || source!=='codex' || seq!==resetStatusSequence) return;
       const job=status.job || {}, running=job.state==='running';
       renderResetResult(running ? job : (status.result || job));
-      text($('reset-context'),running?'Сброс выполняется…':'Сбросить контекст');
+      text($('reset-context'),running?'Resetting…':'Reset context');
       if ($('reset-dialog').open && resetDialogId===id) {
-        $('reset-cancel').textContent=running || resetDialogStarted ? 'Закрыть' : 'Отмена';
+        $('reset-cancel').textContent=running || resetDialogStarted ? 'Close' : 'Cancel';
         $('reset-confirm').disabled=resetStarting || running || resetDialogStarted || !status.readiness?.ready;
-        text($('reset-dialog-status'),running ? job.stage+'…' : resetDialogStarted ? (job.state==='completed' ? 'Готово. Откройте Codex и повторите короткий вопрос.' : (job.error || job.restore_error || 'Операция не завершена.')) : (resetActionError || (status.readiness?.ready ? 'Всё готово к созданию окна.' : status.readiness?.reason || 'Проверяем состояние чата…')));
+        text($('reset-dialog-status'),running ? job.stage+'…' : resetDialogStarted ? (job.state==='completed' ? 'Done. Open Codex and repeat the short question.' : (job.error || job.restore_error || 'Operation incomplete.')) : (resetActionError || (status.readiness?.ready ? 'Ready to create a window.' : status.readiness?.reason || 'Checking chat status…')));
       }
     } catch {
       if (id===selected && $('reset-dialog').open && resetDialogId===id) {
         $('reset-confirm').disabled=true;
-        text($('reset-dialog-status'),'Не удалось проверить состояние. Повторяем…');
+        text($('reset-dialog-status'),'Could not check status. Retrying…');
       }
     }
   }
@@ -503,9 +505,9 @@
     text($('reset-chat-name'),$('session-title').textContent);
     const last=lastAnalysis?.points?.at(-1);
     $('reset-compaction').hidden=!isCount(last?.input) || !!lastAnalysis?.pending_compaction;
-    if (!$('reset-compaction').hidden) text($('reset-compaction'),`Последний замер: ${count(last.input)} токенов${last.model?' '+last.model:''}.`);
+    if (!$('reset-compaction').hidden) text($('reset-compaction'),`Last measurement: ${count(last.input)} tokens${last.model?' '+last.model:''}.`);
     $('reset-confirm').disabled=true;
-    text($('reset-dialog-status'),'Проверяем состояние чата…');
+    text($('reset-dialog-status'),'Checking chat status…');
     $('reset-dialog').showModal();$('reset-cancel').focus();void pollReset();
   });
   $('reset-cancel').addEventListener('click',()=>$('reset-dialog').close());
@@ -514,12 +516,12 @@
     resetStarting=true;resetActionError='';$('reset-confirm').disabled=true;
     const id=resetDialogId, options={method:'POST',headers:{'Content-Type':'application/json','X-Inspector-Action':'1'}};
     try {
-      text($('reset-dialog-status'),'Подтверждаем состояние чата…');
+      text($('reset-dialog-status'),'Confirming chat status…');
       const ready=await api('/api/codex/reset/prepare',{...options,body:JSON.stringify({id})});
-      if (!ready.ready) throw new Error(ready.reason || 'Чат не готов к сбросу.');
+      if (!ready.ready) throw new Error(ready.reason || 'Chat is not ready for reset.');
       await api('/api/codex/reset/start',{...options,body:JSON.stringify({id,token:ready.token})});
       resetDialogStarted=true;
-    } catch (error) { resetActionError=error.message || 'Не удалось запустить сброс.';text($('reset-dialog-status'),resetActionError); }
+    } catch (error) { resetActionError=error.message || 'Could not start reset.';text($('reset-dialog-status'),resetActionError); }
     finally { resetStarting=false;void pollReset(); }
   });
   const sourceNames = ['now','codex'];
@@ -551,7 +553,7 @@
       const feed=$('feed'), height=feed.scrollHeight, top=feed.scrollTop;
       render(data);feed.scrollTop=top+feed.scrollHeight-height;
       $('older-events').hidden=nextBefore===null;
-    } catch { if(version===generation){text($('session-error'),'Не удалось загрузить ранние события. Повторите.');$('session-error').hidden=false;} }
+    } catch { if(version===generation){text($('session-error'),'Could not load earlier events. Try again.');$('session-error').hidden=false;} }
     finally{$('older-events').disabled=false;}
   });
   // The separator owns only sidebar geometry; it never changes source data.
@@ -566,7 +568,7 @@
     const actual = Math.round(Math.max(min, Math.min(max, width)));
     workspace.style.setProperty('--sidebar-width', actual + 'px');
     splitter.setAttribute('aria-valuemin', String(min));splitter.setAttribute('aria-valuemax', String(max));
-    splitter.setAttribute('aria-valuenow', String(actual));splitter.setAttribute('aria-valuetext', actual + ' пикселей');
+    splitter.setAttribute('aria-valuenow', String(actual));splitter.setAttribute('aria-valuetext', actual + ' pixels');
     workspace.style.setProperty('--workspace-top', Math.round(workspace.getBoundingClientRect().top + scrollY) + 'px');
     if (persist) { preferredWidth=actual;save('inspector.sidebarWidth', String(actual)); }
     return actual;
@@ -598,9 +600,9 @@
     const collapse = [...turns.values()].some(turn => !turn.answers.hidden && turn.answers.open);
     allCollapsed = collapse; save('inspector.collapsed', String(collapse));
     for (const turn of turns.values()) turn.answers.open = !collapse;
-    text($('collapse-all'), collapse ? 'Развернуть все ответы' : 'Свернуть все ответы');
+    text($('collapse-all'), collapse ? 'Expand all replies' : 'Collapse all replies');
   });
-  text($('collapse-all'), allCollapsed ? 'Развернуть все ответы' : 'Свернуть все ответы');
+  text($('collapse-all'), allCollapsed ? 'Expand all replies' : 'Collapse all replies');
   $('new-events').addEventListener('click', bottom);
   $('feed').addEventListener('scroll', () => { if (nearBottom()) { unread.clear(); $('new-events').hidden = true; } }, {passive: true});
   async function start() {

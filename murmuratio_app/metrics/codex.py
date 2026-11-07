@@ -33,4 +33,4 @@ def analyze_context(snapshot: ContextTimeline):
         'largest_blocks':[{**x,'duplicates':snapshot['hashes'][x['digest']]} for x in snapshot['top']],
         'categories':[{'name':k,'characters':v,'estimated_tokens':math.ceil(v/4)} for k,v in snapshot['categories'].items()],
         'rate_limits':snapshot['quota'],'malformed_records':snapshot['malformed'],
-        'context_basis':'Сохранённые текстовые части после последнего сжатия, включая replacement history и базовые инструкции. Не точный запрос; зашифрованное резюме не оценено.'}
+        'context_basis':'Saved text since the last compaction, including replacement history and base instructions. Not an exact request; encrypted summary not estimated.'}

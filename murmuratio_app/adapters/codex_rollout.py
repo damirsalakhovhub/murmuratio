@@ -18,16 +18,16 @@ def item_text(p):
     """Never expose encrypted reasoning, inline binary media or passthrough metadata."""
     t=p.get('type')
     if t=='reasoning': return '\n'.join(x.get('text','') for x in p.get('summary',[]) if isinstance(x,dict))
-    if t=='compaction': return '[Зашифрованное резюме сжатия; размер в токенах неизвестен]'
+    if t=='compaction': return '[Encrypted compaction summary; token count unknown]'
     if t=='additional_tools': return json.dumps(p.get('tools',[]),ensure_ascii=False,indent=2)
     if t in ('function_call','custom_tool_call'): return json.dumps({'name':p.get('name'),'arguments':p.get('arguments',p.get('input'))},ensure_ascii=False,indent=2)
     if t in ('function_call_output','custom_tool_call_output'):
         v=p.get('output','')
         if isinstance(v,str):return v
-        return '\n'.join(x.get('text','[Нетекстовый результат]') for x in v if isinstance(x,dict)) if isinstance(v,list) else ''
+        return '\n'.join(x.get('text','[Non-text result]') for x in v if isinstance(x,dict)) if isinstance(v,list) else ''
     content=p.get('content',[])
     if isinstance(content,str):return content
-    if isinstance(content,list):return '\n'.join(x.get('text','[Нетекстовое вложение]') for x in content if isinstance(x,dict))
+    if isinstance(content,list):return '\n'.join(x.get('text','[Non-text attachment]') for x in content if isinstance(x,dict))
     return ''
 
 
@@ -35,11 +35,11 @@ def item_kind(p):
     t=p.get('type')
     if t in ('message','agent_message'):
         r=p.get('role','assistant' if t=='agent_message' else '')
-        return {'user':('user','Вы / сохранённый user-контекст'),'assistant':('assistant','Ответ модели')}.get(r,('context','Инструкции / контекст'))
-    return {'function_call':('tool_call','Вызов инструмента'),'custom_tool_call':('tool_call','Вызов инструмента'),
-        'function_call_output':('tool_result','Результат инструмента'),'custom_tool_call_output':('tool_result','Результат инструмента'),
-        'additional_tools':('context','Описания инструментов'),'compaction':('context','Резюме сжатия'),
-        'reasoning':('notification','Сохранённое резюме reasoning')}.get(t,('notification',str(t)))
+        return {'user':('user','You / saved user context'),'assistant':('assistant','Model reply')}.get(r,('context','Instructions / context'))
+    return {'function_call':('tool_call','Tool call'),'custom_tool_call':('tool_call','Tool call'),
+        'function_call_output':('tool_result','Tool result'),'custom_tool_call_output':('tool_result','Tool result'),
+        'additional_tools':('context','Tool definitions'),'compaction':('context','Compaction summary'),
+        'reasoning':('notification','Saved reasoning summary')}.get(t,('notification',str(t)))
 
 
 class Index:
@@ -75,7 +75,7 @@ class Index:
         self.last=u;self.last_at=at;self.last_origin='token_count' if legacy else 'token_usage_record'
         if legacy and self.pending_compact:return # synthetic post-compaction count is not a new response
         self.pending_compact=False;self.last_limit=self.limit
-        e=self.add(offset,'model_record','Обращение к модели',at,usage=u,
+        e=self.add(offset,'model_record','Model request',at,usage=u,
             inference={'provider':'codex','requestedModel':self.model,'resolvedModel':p.get('model'),'reasoning':self.effort})
         self.points.append({'event_id':e['id'],'time':at,'input':u.get('input_tokens'),'output':u.get('output_tokens'),
             'cached':u.get('cache_read_tokens'),'model':self.model,'limit':self.limit,'segment':len(self.compactions)})
@@ -102,17 +102,17 @@ class Index:
                     if t=='session_meta':
                         b=p.get('base_instructions',{})
                         self.base=b.get('text','') if isinstance(b,dict) else str(b or '')
-                        self.account_text(self.base,'Базовые инструкции','Инструкции','base')
+                        self.account_text(self.base,'Base instructions','Instructions','base')
                     elif t=='turn_context':
                         old=self.model;self.model=p.get('model');self.effort=p.get('effort')
                         self.group=p.get('turn_id') or self.group
-                        if old and old!=self.model:self.add(offset,'model_change','Смена запрошенной модели',at,text=f'{old} → {self.model}')
+                        if old and old!=self.model:self.add(offset,'model_change','Requested model changed',at,text=f'{old} → {self.model}')
                     elif t=='response_item':
                         kind,title=item_kind(p);txt=item_text(p)
                         if kind=='user' and self.group=='initial':self.group=f'user:{offset}'
                         if not txt:continue
                         e=self.add(offset,kind,title,at)
-                        cat={'tool_result':'Результаты инструментов','tool_call':'Вызовы инструментов','user':'Сообщения user','assistant':'Ответы модели','context':'Инструкции / контекст'}.get(kind,'Резюме reasoning')
+                        cat={'tool_result':'Tool results','tool_call':'Tool calls','user':'User messages','assistant':'Model replies','context':'Instructions / context'}.get(kind,'Reasoning summary')
                         if p.get('type')!='compaction':self.account_text(txt,title,cat,e['id'])
                     elif t=='token_usage_record':
                         rid=p.get('response_id')
@@ -126,16 +126,16 @@ class Index:
                         self.compactions.append({'mode':'boundary'} if mode=='boundary' else
                             {'time':at,'before_input':before,'event_index':len(self.events),'mode':mode})
                         if mode=='reset':
-                            self.add(offset,'context_reset','Сброс контекста',at,text='Создано новое окно контекста.')
+                            self.add(offset,'context_reset','Context reset',at,text='New context window created.')
                         elif mode=='compaction':
-                            self.add(offset,'compaction','Сжатие контекста',at,text='История заменена сохранённым результатом сжатия.')
+                            self.add(offset,'compaction','Context compaction',at,text='History replaced with the saved compaction result.')
                         self.pending_compact=True;self.top=[];self.categories=Counter();self.hashes=Counter()
-                        self.account_text(self.base,'Базовые инструкции','Инструкции','base')
+                        self.account_text(self.base,'Base instructions','Instructions','base')
                         for x in p.get('replacement_history',[]) or []:
                             if not isinstance(x,dict) or x.get('type')=='compaction':continue
                             kind,title=item_kind(x)
-                            self.account_text(item_text(x),('После изменения: ' if mode=='boundary' else 'После сжатия: ')+title,
-                                              'Сохранено после изменения' if mode=='boundary' else 'Сохранено при сжатии',None)
+                            self.account_text(item_text(x),('After change: ' if mode=='boundary' else 'After compaction: ')+title,
+                                              'Saved after change' if mode=='boundary' else 'Saved during compaction',None)
                     elif t=='event_msg':
                         et=p.get('type')
                         if et=='task_started':
@@ -149,9 +149,9 @@ class Index:
                                 if fingerprint!=self.last_legacy:
                                     self.record_usage(info,offset,at,True);self.last_legacy=fingerprint
                         elif et in ('model_rerouted','model/rerouted'):
-                            self.add(offset,'model_change','Перенаправление сервером',at,text=json.dumps({k:p.get(k) for k in ['from_model','to_model','fromModel','toModel','reason'] if k in p},ensure_ascii=False))
+                            self.add(offset,'model_change','Server reroute',at,text=json.dumps({k:p.get(k) for k in ['from_model','to_model','fromModel','toModel','reason'] if k in p},ensure_ascii=False))
                         elif et in ('error','turn_aborted'):
-                            self.add(offset,'error' if et=='error' else 'notification','Ошибка' if et=='error' else 'Ход прерван',at,text=str(p.get('message') or p.get('reason') or et))
+                            self.add(offset,'error' if et=='error' else 'notification','Error' if et=='error' else 'Turn aborted',at,text=str(p.get('message') or p.get('reason') or et))
                 except (ValueError, TypeError, AttributeError, KeyError, OverflowError):
                     self.malformed += 1
         self.mtime=st.st_mtime_ns
@@ -169,7 +169,7 @@ class Index:
                 if e['kind'] not in ('model_record','model_change','compaction','context_reset','error') and not txt:
                     f.seek(e['offset'])
                     try:txt=item_text(json.loads(f.readline()).get('payload',{}))
-                    except (ValueError,UnicodeError):txt='Не удалось прочитать запись'
+                    except (ValueError,UnicodeError):txt='Could not read record'
                 clean=self.sanitize(txt)
                 v['blocks']=[{'id':'content','text':clean[:16000], 'title':e['title'],
                     'characters':len(txt),'estimated_tokens':math.ceil(len(txt)/4),'truncated':len(clean)>16000}] if txt else []

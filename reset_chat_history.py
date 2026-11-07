@@ -50,7 +50,7 @@ def assert_closed():
         if (exe.endswith('/ChatGPT.app/Contents/MacOS/ChatGPT') or
             exe.endswith('/Codex.app/Contents/MacOS/Codex') or
             exe.endswith('/codex') or exe == 'codex'):
-            raise ResetError('Полностью закройте ChatGPT/Codex и все запущенные процессы Codex, затем повторите.')
+            raise ResetError('Fully close ChatGPT/Codex and all running Codex processes, then try again.')
 
 
 def assert_version():
@@ -58,9 +58,9 @@ def assert_version():
         v = subprocess.run([str(CODEX), '--version'], check=True, capture_output=True,
                            text=True, timeout=5).stdout.strip()
     except (OSError, subprocess.SubprocessError) as e:
-        raise ResetError('Не удалось определить версию встроенного Codex.') from e
+        raise ResetError('Could not identify the bundled Codex version.') from e
     if v != TESTED_VERSION:
-        raise ResetError(f'Скрипт проверен на {TESTED_VERSION}; обнаружен {v}.')
+        raise ResetError(f'Script tested on {TESTED_VERSION}; found {v}.')
 
 
 def get_thread(home, query):
@@ -75,37 +75,37 @@ def get_thread(home, query):
             if not rows:
                 rows = db.execute("SELECT * FROM threads WHERE name LIKE ? ESCAPE '\\' COLLATE NOCASE",
                                   ('%' + query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%',)).fetchall()
-    if not rows: raise ResetError('Чат не найден.')
+    if not rows: raise ResetError('Chat not found.')
     if len(rows) > 1:
         matches = '\n'.join(f"  {r['id']}  {r['name'] or r['title']}" for r in rows[:20])
-        raise ResetError('Найдено несколько чатов. Запустите скрипт с нужным ID:\n' + matches)
+        raise ResetError('Multiple chats found. Run the script with the required ID:\n' + matches)
     return dict(rows[0])
 
 
 def check_thread(home, thread):
     tid = thread['id']
-    if thread['archived']: raise ResetError('Чат находится в архиве; сначала верните его из архива.')
+    if thread['archived']: raise ResetError('Chat is archived; unarchive it first.')
     if thread['history_mode'] != 'paginated':
-        raise ResetError('Этот формат истории не проверен; сброс остановлен.')
+        raise ResetError('This history format is untested; reset stopped.')
     path = Path(thread['rollout_path']).resolve()
     if not path.is_relative_to((home / 'sessions').resolve()) or not path.is_file():
-        raise ResetError('Файл истории находится в неожиданном месте; сброс остановлен.')
+        raise ResetError('History file is in an unexpected location; reset stopped.')
     with path.open('rb') as f: first = f.readline()
     try: meta = json.loads(first)
-    except (ValueError, UnicodeError) as e: raise ResetError('Некорректный файл истории.') from e
+    except (ValueError, UnicodeError) as e: raise ResetError('Invalid history file.') from e
     if not first.endswith(b'\n') or meta.get('type') != 'session_meta' or meta.get('payload', {}).get('id') != tid:
-        raise ResetError('ID в файле истории не совпадает; сброс остановлен.')
+        raise ResetError('History file ID does not match; reset stopped.')
     for dbname, table, message in [
-        ('queue_1.sqlite', 'queued_items', 'В чате есть сообщения в очереди.'),
-        ('goals_1.sqlite', 'thread_goals', 'У чата есть сохранённая цель.'),
-        ('memories_1.sqlite', 'stage1_outputs', 'Для чата существует сохранённая память.')]:
+        ('queue_1.sqlite', 'queued_items', 'The chat has queued messages.'),
+        ('goals_1.sqlite', 'thread_goals', 'The chat has a saved goal.'),
+        ('memories_1.sqlite', 'stage1_outputs', 'The chat has saved memory.')]:
         p = home / dbname
         if not p.exists(): continue
         try:
             with ro(p) as db: count = db.execute(f'SELECT COUNT(*) FROM {table} WHERE thread_id=?', (tid,)).fetchone()[0]
         except sqlite3.Error as e:
-            raise ResetError(f'Не удалось проверить {dbname}; сброс остановлен.') from e
-        if count: raise ResetError(message + ' Сброс не запущен.')
+            raise ResetError(f'Could not check {dbname}; reset stopped.') from e
+        if count: raise ResetError(message + ' Reset not started.')
     return path, first
 
 
@@ -128,7 +128,7 @@ def make_backup(home, thread, rollout):
         os.chmod(folder / 'rollout.jsonl', 0o600)
         for name, tables in TABLES.items():
             src, dst = home / name, folder / name
-            if not src.exists(): raise ResetError(f'Не найдена база {name}.')
+            if not src.exists(): raise ResetError(f'Database {name} not found.')
             for table, column in tables: snapshot_table(src, dst, table, column, thread['id'])
             os.chmod(dst, 0o600)
         manifest = {'thread_id': thread['id'], 'codex_home': str(home.resolve()),
@@ -186,7 +186,7 @@ def wipe(home, thread, rollout, first):
         # rollout is cleared. Preserve the explicit name rather than that text.
         db.execute("UPDATE threads SET title=CASE WHEN name IS NOT NULL AND name!='' THEN name ELSE '' END, "
                    "first_user_message='', preview='', tokens_used=0, has_user_event=0 WHERE id=?", (tid,))
-        if db.total_changes != 1: raise ResetError('Строка чата не найдена при обновлении.')
+        if db.total_changes != 1: raise ResetError('Chat row not found during update.')
         db.execute('DELETE FROM thread_read_receipts WHERE thread_id=?', (tid,))
         db.commit()
 
@@ -196,17 +196,17 @@ def restore(home, folder):
     meta = json.loads(manifest_path.read_text())
     tid = str(uuid.UUID(meta['thread_id']))
     if Path(meta['codex_home']).resolve() != home.resolve():
-        raise ResetError('Резервная копия создана для другого каталога Codex.')
+        raise ResetError('Backup belongs to a different Codex directory.')
     rollout = Path(meta['rollout_path']).resolve()
     if not rollout.is_relative_to((home / 'sessions').resolve()) or not rollout.is_file():
-        raise ResetError('Исходный файл чата не найден в текущем Codex.')
+        raise ResetError('Original chat file not found in the current Codex directory.')
     backup_rollout = folder / 'rollout.jsonl'
     with backup_rollout.open('rb') as f:
         first = json.loads(f.readline())
-    if first.get('payload', {}).get('id') != tid: raise ResetError('Некорректная резервная копия.')
+    if first.get('payload', {}).get('id') != tid: raise ResetError('Invalid backup.')
     for name, tables in TABLES.items():
         snap = folder / name
-        if not snap.is_file(): raise ResetError(f'В резервной копии нет {name}.')
+        if not snap.is_file(): raise ResetError(f'Backup does not contain {name}.')
         with sqlite3.connect(home / name, timeout=10) as db:
             db.execute('ATTACH DATABASE ? AS saved', (f'{snap.resolve().as_uri()}?mode=ro',))
             db.execute('BEGIN IMMEDIATE')
@@ -214,15 +214,15 @@ def restore(home, folder):
                 columns = [r[1] for r in db.execute(f'PRAGMA main.table_info("{table}")')]
                 saved_cols = [r[1] for r in db.execute(f'PRAGMA saved.table_info("{table}")')]
                 if columns != saved_cols:
-                    raise ResetError('Схема Codex изменилась; автоматическое восстановление остановлено.')
+                    raise ResetError('Codex schema changed; automatic restore stopped.')
                 if table == 'threads':
                     values = db.execute('SELECT * FROM saved.threads WHERE id=?', (tid,)).fetchone()
-                    if not values: raise ResetError('В резервной копии нет данных чата.')
+                    if not values: raise ResetError('Backup contains no chat data.')
                     updates = [c for c in columns if c != 'id']
                     data = dict(zip(columns, values))
                     updated = db.execute('UPDATE threads SET ' + ','.join(f'"{c}"=?' for c in updates) + ' WHERE id=?',
                                          [data[c] for c in updates] + [tid])
-                    if updated.rowcount != 1: raise ResetError('Исходный чат не найден.')
+                    if updated.rowcount != 1: raise ResetError('Original chat not found.')
                 else:
                     db.execute(f'DELETE FROM main."{table}" WHERE "{column}"=?', (tid,))
                     db.execute(f'INSERT INTO main."{table}" SELECT * FROM saved."{table}" WHERE "{column}"=?', (tid,))
@@ -231,10 +231,10 @@ def restore(home, folder):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Очистить историю одного локального чата Codex, сохранив его ID.')
+    parser = argparse.ArgumentParser(description='Clear one local Codex chat history, keeping its ID.')
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('--chat', help='Название или ID чата')
-    group.add_argument('--restore', metavar='BACKUP_DIR', help='Восстановить созданную скриптом резервную копию')
+    group.add_argument('--chat', help='Chat name or ID')
+    group.add_argument('--restore', metavar='BACKUP_DIR', help='Restore a backup created by this script')
     args = parser.parse_args()
     try:
         assert_version()
@@ -242,19 +242,19 @@ def main():
         if args.restore:
             folder = Path(args.restore).expanduser().resolve()
             if not folder.is_relative_to((CODEX_HOME / 'inspector-reset-backups').resolve()):
-                raise ResetError('Путь находится вне каталога резервных копий.')
-            print('Восстановить резервную копию:', folder)
-            print('Сообщения, добавленные в этот чат после сброса, будут заменены содержимым копии.')
-            if input('Для подтверждения введите ВОССТАНОВИТЬ: ').strip() != 'ВОССТАНОВИТЬ':
-                print('Отменено.'); return
+                raise ResetError('Path is outside the backup directory.')
+            print('Restore backup:', folder)
+            print('Messages added to this chat after reset will be replaced with the backup contents.')
+            if input('Type RESTORE to confirm: ').strip() != 'RESTORE':
+                print('Cancelled.'); return
             assert_closed(); restore(CODEX_HOME, folder)
-            print('Резервная копия восстановлена.'); return
+            print('Backup restored.'); return
         thread = get_thread(CODEX_HOME, args.chat)
         rollout, first = check_thread(CODEX_HOME, thread)
-        print(f"Чат: {thread['name'] or thread['title']}\nID: {thread['id']}\nПроект: {thread['cwd']}")
-        print('История чата будет очищена; ID и проект сохранятся. Резервная копия останется на диске.')
-        if input('Для подтверждения введите СБРОС: ').strip() != 'СБРОС':
-            print('Отменено.'); return
+        print(f"Chat: {thread['name'] or thread['title']}\nID: {thread['id']}\nProject: {thread['cwd']}")
+        print('Chat history will be cleared; its ID and project will stay. A backup will remain on disk.')
+        if input('Type RESET to confirm: ').strip() != 'RESET':
+            print('Cancelled.'); return
         folder = make_backup(CODEX_HOME, thread, rollout)
         assert_closed()
         try:
@@ -263,12 +263,12 @@ def main():
             try:
                 restore(CODEX_HOME, folder)
             except Exception as restore_error:
-                raise ResetError(f'Сброс не завершён; автоматическое восстановление не удалось: {restore_error}. Копия: {folder}') from error
-            raise ResetError(f'Сброс не завершён, исходная история восстановлена: {error}') from error
-        print('Готово. ID сохранён. Резервная копия:', folder)
-        print('Откройте Codex и отправьте короткое сообщение, чтобы увидеть новый размер контекста.')
+                raise ResetError(f'Reset incomplete; automatic restore failed: {restore_error}. Backup: {folder}') from error
+            raise ResetError(f'Reset incomplete, original history restored: {error}') from error
+        print('Done. ID kept. Backup:', folder)
+        print('Open Codex and send a short message to see the new context size.')
     except (ResetError, OSError, sqlite3.Error, subprocess.SubprocessError, json.JSONDecodeError, EOFError) as e:
-        print('Сброс не выполнен:', e, file=sys.stderr)
+        print('Reset not applied:', e, file=sys.stderr)
         sys.exit(1)
 
 

@@ -11,10 +11,10 @@ from murmuratio_app.common import timestamp
 from murmuratio_app.adapters.parsing import consume_codex
 
 LIMITATIONS = [
-    'Сохранённая история Codex, не точная копия сетевого запроса. Скрытая версия модели неизвестна.',
-    'Последний вход — измерение прошлого обращения, не прогноз следующего. После сжатия ждём новый замер.',
-    'Размеры блоков — символы / 4, не токенизатор. Зашифрованные части и изображения не оценены.',
-    'Кеш входит во вход, reasoning входит в выход. Счётчики не означают денежное списание.',
+    'Saved Codex history, not an exact network request. The hidden model version is unknown.',
+    'Last input measures the previous request, not the next one. A new measurement is needed after compaction.',
+    'Block sizes use characters / 4, not a tokenizer. Encrypted content and images are not estimated.',
+    'Cache is included in input; reasoning is included in output. Counts are not monetary charges.',
 ]
 
 def stamp(v):
@@ -37,7 +37,7 @@ class CodexSource(Adapter):
         return path
     def summary(self,r):
         d=dict(r)
-        return self.sanitize({'id':d['id'],'name':d.get('name') or ((d.get('title') or 'Без названия')[:160] + ('…' if len(d.get('title') or '')>160 else '')),'updated_at':stamp(d.get('updated_at')),
+        return self.sanitize({'id':d['id'],'name':d.get('name') or ((d.get('title') or 'Untitled')[:160] + ('…' if len(d.get('title') or '')>160 else '')),'updated_at':stamp(d.get('updated_at')),
             'cwd':d.get('cwd'),'model':d.get('model'),'archived':bool(d.get('archived')),
             'is_agent':bool(d.get('agent_path') and d.get('agent_path')!='/root') or 'subagent' in str(d.get('source','')).lower(),
             'totals':{'total_tokens':d.get('tokens_used')},'provider':'codex'})

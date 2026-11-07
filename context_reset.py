@@ -35,7 +35,7 @@ def codex_version(executable):
         return subprocess.run([str(executable), '--version'], check=True, capture_output=True,
                               text=True, timeout=5).stdout.strip()
     except (OSError, subprocess.SubprocessError) as exc:
-        raise ResetError('Не удалось проверить версию Codex.') from exc
+        raise ResetError('Could not check the Codex version.') from exc
 
 
 def recovery_message(original):
@@ -44,10 +44,10 @@ def recovery_message(original):
     mode = profile.get('id') if isinstance(profile, dict) else None
     if not mode and isinstance(sandbox, dict):
         mode = sandbox.get('type')
-    return ('Проверьте исходные настройки в Codex: модель '
-            f"{original.get('model') or 'неизвестна'}, reasoning {original.get('reasoningEffort') or 'неизвестен'}, "
-            f"разрешения {mode or 'неизвестны'}, подтверждения {original.get('approvalPolicy') or 'неизвестны'}. "
-            'Повтор заблокирован; для снятия блокировки нужна отдельная проверка настроек.')
+    return ('Check the original settings in Codex: model '
+            f"{original.get('model') or 'unknown'}, reasoning {original.get('reasoningEffort') or 'unknown'}, "
+            f"permissions {mode or 'unknown'}, approvals {original.get('approvalPolicy') or 'unknown'}. "
+            'Retry is blocked until the settings are checked separately.')
 
 
 def desktop_busy(ignored_pids=()):
@@ -56,7 +56,7 @@ def desktop_busy(ignored_pids=()):
         result = subprocess.run(['/bin/ps', '-axo', 'pid=,comm='], check=True,
                                 capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
-        raise ResetError('Не удалось проверить запущенные процессы Codex.')
+        raise ResetError('Could not check running Codex processes.')
     for line in result.stdout.splitlines():
         parts = line.strip().split(None, 1)
         if len(parts) != 2:
@@ -83,11 +83,11 @@ def _flags(home):
     except FileNotFoundError:
         data = {}
     except (OSError, ValueError, tomllib.TOMLDecodeError):
-        raise ResetError('Не удалось безопасно прочитать настройки Codex.')
+        raise ResetError('Could not safely read Codex settings.')
     for section in ('mcp_servers', 'plugins', 'apps'):
         values = data.get(section, {})
         if not isinstance(values, dict):
-            raise ResetError('Неизвестный формат настроек инструментов Codex.')
+            raise ResetError('Unknown Codex tool settings format.')
         names = set(values)
         if section == 'apps':
             names.add('_default')
@@ -109,7 +109,7 @@ class AppServer:
                 cwd=str(cwd), env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, text=True, bufsize=1)
         except OSError as exc:
-            raise ResetError('Не удалось запустить локальный Codex.') from exc
+            raise ResetError('Could not start local Codex.') from exc
         self.queue = queue.Queue()
         self.pending = deque()
         self.seq = 0
@@ -127,7 +127,7 @@ class AppServer:
             self.proc.stdin.write(json.dumps(value, ensure_ascii=False) + '\n')
             self.proc.stdin.flush()
         except (BrokenPipeError, OSError) as exc:
-            raise ResetError('Codex прервал соединение.') from exc
+            raise ResetError('Codex disconnected.') from exc
 
     def wait(self, predicate, timeout=90):
         deadline = time.monotonic() + timeout
@@ -142,7 +142,7 @@ class AppServer:
                 msg = self.queue.get(timeout=min(1, max(.01, deadline-time.monotonic())))
             except queue.Empty:
                 if self.proc.poll() is not None:
-                    raise ResetError('Codex завершился до окончания операции.')
+                    raise ResetError('Codex exited before the operation finished.')
                 continue
             if 'method' in msg and 'id' in msg:
                 # Never authorize dynamic tools, confirmations, or side effects.
@@ -153,8 +153,8 @@ class AppServer:
                 return msg
             self.pending.append(msg)
             if len(self.pending) > 10000:
-                raise ResetError('Слишком много событий Codex во время измерения.')
-        raise ResetError('Codex не ответил вовремя.')
+                raise ResetError('Too many Codex events during measurement.')
+        raise ResetError('Codex timed out.')
 
     def rpc(self, method, params, timeout=90):
         self.seq += 1
@@ -162,9 +162,9 @@ class AppServer:
         self.send({'id': ident, 'method': method, 'params': params})
         msg = self.wait(lambda x: x.get('id') == ident and 'method' not in x, timeout)
         if self.blocked_tool:
-            raise ResetError('Codex запросил неподдерживаемое действие; операция остановлена.')
+            raise ResetError('Codex requested an unsupported action; operation stopped.')
         if 'error' in msg:
-            raise ResetError('Codex отклонил запрос: ' + str(msg['error'].get('message', 'ошибка'))[:200])
+            raise ResetError('Codex rejected the request: ' + str(msg['error'].get('message', 'error'))[:200])
         return msg.get('result', {})
 
     def initialize(self):
@@ -176,16 +176,16 @@ class AppServer:
         result = self.rpc('config/read', {'cwd': str(self.cwd), 'includeLayers': False})
         config = result.get('config')
         if not isinstance(config, dict):
-            raise ResetError('Не удалось проверить настройки инструментов; сброс не запущен.')
+            raise ResetError('Could not check tool settings; reset not started.')
         features = config.get('features') or {}
         if not isinstance(features, dict) or not isinstance(features.get('context_management'), dict) or features['context_management'].get('experimental_mode') is not True:
-            raise ResetError('Экспериментальное окно контекста недоступно; операция не запущена.')
+            raise ResetError('Experimental context window unavailable; operation not started.')
         for section in ('mcp_servers', 'plugins', 'apps'):
             values = config.get(section, {})
             if not isinstance(values, dict) or any(not isinstance(v, dict) or v.get('enabled', True) is not False for v in values.values()):
-                raise ResetError('Не удалось отключить все MCP, плагины и приложения; сброс не запущен.')
+                raise ResetError('Could not disable all MCP servers, plugins and apps; reset not started.')
             if section == 'apps' and not isinstance(values.get('_default'), dict):
-                raise ResetError('Не удалось проверить приложения; сброс не запущен.')
+                raise ResetError('Could not check apps; reset not started.')
 
     def close(self):
         try:
@@ -247,8 +247,8 @@ class ResetController:
         for result in self.results.values():
             if isinstance(result, dict) and result.get('state') == 'running':
                 result.update({'state': 'error', 'reset_applied': None,
-                    'error': 'Инспектор перезапустился во время операции. Результат сброса неизвестен.',
-                    'restore_error': 'Проверьте модель и разрешения чата в Codex.'})
+                    'error': 'The inspector restarted during the operation. The reset result is unknown.',
+                    'restore_error': 'Check the chat model and permissions in Codex.'})
             if isinstance(result, dict) and isinstance(result.get('original_settings'), dict):
                 result['restore_error'] = recovery_message(result['original_settings'])
 
@@ -271,7 +271,7 @@ class ResetController:
         stamp = (info.st_ino, info.st_size, info.st_mtime_ns)
         if stamp != self.version_stamp:
             if self.version_check(self.executable) != VERIFIED_VERSION:
-                raise ResetError('Эта версия Codex ещё не проверена; создание окна отключено.')
+                raise ResetError('This Codex version is untested; window creation is disabled.')
             self.version_stamp = stamp
 
     def _load(self):
@@ -320,20 +320,20 @@ class ResetController:
 
     def _target(self, thread_id):
         if not isinstance(thread_id, str) or not UUID.fullmatch(thread_id):
-            raise ResetError('Некорректный ID чата.')
+            raise ResetError('Invalid chat ID.')
         c = self.codex.connect()
         try:
             row = c.execute('SELECT * FROM threads WHERE id=?', (thread_id,)).fetchone()
         finally:
             c.close()
         if row is None or row['archived']:
-            raise ResetError('Активный локальный чат не найден.')
+            raise ResetError('Active local chat not found.')
         rollout = Path(row['rollout_path']).resolve()
         if not rollout.is_relative_to(self.codex.home / 'sessions') or not rollout.is_file():
-            raise ResetError('Файл чата недоступен для сброса.')
+            raise ResetError('Chat file unavailable for reset.')
         cwd = Path(row['cwd']).expanduser().resolve()
         if not cwd.is_dir():
-            raise ResetError('Рабочая папка чата недоступна.')
+            raise ResetError('Chat working directory unavailable.')
         return row, rollout, cwd
 
     def _check_goal(self, thread_id):
@@ -347,9 +347,9 @@ class ResetController:
             finally:
                 c.close()
         except sqlite3.Error as exc:
-            raise ResetError('Не удалось проверить состояние цели чата.') from exc
+            raise ResetError('Could not check the chat goal status.') from exc
         if row and row[0] == 'active':
-            raise ResetError('В чате есть активная цель. Сначала приостановите её в Codex.')
+            raise ResetError('The chat has an active goal. Pause it in Codex first.')
 
     def _baseline(self, thread_id):
         analysis = self.codex.session(thread_id).get('analysis', {})
@@ -358,7 +358,7 @@ class ResetController:
         if (analysis.get('pending_compaction') or not isinstance(last.get('input'), int)
                 or last['input'] < 0 or not isinstance(last.get('limit'), int)
                 or last['limit'] <= 0 or not last.get('model')):
-            raise ResetError('Сначала отправьте в чате короткий вопрос и дождитесь ответа для замера до сброса.')
+            raise ResetError('Send a short question in the chat and wait for a reply to measure context before reset.')
         return {'input_tokens': last['input'], 'context_limit': last['limit'],
                 'model': last['model'], 'time': last.get('time')}
 
@@ -373,10 +373,10 @@ class ResetController:
             self._check_goal(thread_id)
             self._baseline(thread_id)
             if not self.executable.is_file():
-                raise ResetError('Встроенный Codex не найден.')
+                raise ResetError('Bundled Codex not found.')
             self._check_version()
             if self.busy_check():
-                raise ResetError('Закройте Codex и другие процессы Codex, затем повторите проверку.')
+                raise ResetError('Close Codex and other Codex processes, then check again.')
             return {'ready': True, 'reason': ''}
         except (ResetError, OSError, sqlite3.Error, KeyError, ValueError, TypeError) as exc:
             return {'ready': False, 'reason': str(exc)}
@@ -385,11 +385,11 @@ class ResetController:
         with self.lock:
             row, rollout, _ = self._target(thread_id)
             if self.jobs.get(thread_id, {}).get('state') == 'running':
-                raise ResetError('Сброс этого чата уже выполняется.')
+                raise ResetError('This chat is already being reset.')
             now = time.monotonic()
             self.challenges = {key: value for key, value in self.challenges.items() if value[3] > now}
             if len(self.challenges) >= 128:
-                raise ResetError('Слишком много ожидающих подтверждений. Повторите позже.')
+                raise ResetError('Too many pending confirmations. Try again later.')
             token = secrets.token_urlsafe(24)
             st = rollout.stat()
             self.challenges[token] = (thread_id, st.st_size, st.st_mtime_ns, now+120)
@@ -399,17 +399,17 @@ class ResetController:
         with self.lock:
             challenge = self.challenges.pop(token, None)
             if not challenge or challenge[0] != thread_id or challenge[3] < time.monotonic():
-                raise ResetError('Подтверждение устарело. Откройте окно ещё раз.')
+                raise ResetError('Confirmation expired. Reopen the dialog.')
             row, rollout, cwd = self._target(thread_id)
             st = rollout.stat()
             if (st.st_size, st.st_mtime_ns) != (challenge[1], challenge[2]):
-                raise ResetError('Чат изменился после подтверждения. Повторите проверку.')
+                raise ResetError('The chat changed after confirmation. Check again.')
             ready = self.readiness(thread_id)
             if not ready['ready']:
                 raise ResetError(ready['reason'])
             if any(job.get('state') == 'running' for job in self.jobs.values()):
-                raise ResetError('Дождитесь завершения другого сброса.')
-            job = {'state': 'running', 'stage': 'Подготовка', 'reset_applied': False,
+                raise ResetError('Wait for the other reset to finish.')
+            job = {'state': 'running', 'stage': 'Preparing', 'reset_applied': False,
                    'thread_id': thread_id, 'model': MODEL, 'started_at': datetime.now(timezone.utc).isoformat()}
             self.jobs[thread_id] = job
             previous = self.results.get(thread_id)
@@ -422,11 +422,11 @@ class ResetController:
                     self.results.pop(thread_id, None)
                 else:
                     self.results[thread_id] = previous
-                raise ResetError('Не удалось сохранить состояние операции; сброс не запущен.') from exc
+                raise ResetError('Could not save operation status; reset not started.') from exc
             try:
                 threading.Thread(target=self._run, args=(thread_id, rollout, cwd, job), daemon=True).start()
             except RuntimeError as exc:
-                job.update({'state': 'error', 'stage': 'Не завершено', 'error': 'Не удалось запустить сброс.'})
+                job.update({'state': 'error', 'stage': 'Incomplete', 'error': 'Could not start reset.'})
                 self.results[thread_id] = dict(job)
                 try:
                     self._save()
@@ -447,7 +447,7 @@ class ResetController:
             try:
                 self._save()
             except OSError as exc:
-                raise ResetError('Не удалось сохранить состояние операции.') from exc
+                raise ResetError('Could not save operation status.') from exc
 
     def _run(self, thread_id, rollout, cwd, job):
         original = None
@@ -457,50 +457,50 @@ class ResetController:
         restored = False
         try:
             job['before'] = self._baseline(thread_id)
-            self._stage(job, 'Проверяем настройки чата')
+            self._stage(job, 'Checking chat settings')
             server = AppServer(self.codex.home, cwd, self.executable)
             server.initialize()
             result = server.rpc('thread/resume', {'threadId': thread_id, 'excludeTurns': True})
             if result.get('thread', {}).get('status', {}).get('type') not in ('idle', 'notLoaded'):
-                raise ResetError('Чат занят. Дождитесь завершения задачи.')
+                raise ResetError('Chat is busy. Wait for the task to finish.')
             original = {k: result.get(k) for k in SETTINGS}
             if not original['model'] or not original['reasoningEffort'] or not original['sandbox'] or original['approvalPolicy'] is None:
-                raise ResetError('Не удалось определить настройки чата для восстановления.')
+                raise ResetError('Could not identify chat settings to restore.')
             if original['modelProvider'] != 'openai':
-                raise ResetError('Эксперимент поддерживается только для провайдера OpenAI.')
+                raise ResetError('The experiment only supports the OpenAI provider.')
             job['original_settings'] = original
             # Persist recovery data before even attempting to override settings.
-            self._stage(job, 'Сохраняем настройки чата')
+            self._stage(job, 'Saving chat settings')
             server.close(); server = None
             if self.busy_check():
-                raise ResetError('Codex был открыт. Повторите после его закрытия.')
+                raise ResetError('Codex was open. Close it and try again.')
             server = AppServer(self.codex.home, cwd, self.executable)
             server.initialize()
             settings_overridden = True
             resumed = server.rpc('thread/resume', {'threadId': thread_id, 'excludeTurns': True,
                                  'model': MODEL, 'sandbox': 'read-only', 'approvalPolicy': 'never'})
             if resumed.get('thread', {}).get('id') != thread_id or resumed.get('model') != MODEL or resumed.get('modelProvider') != 'openai':
-                raise ResetError('Codex открыл другой чат, модель или провайдера; операция остановлена.')
+                raise ResetError('Codex opened a different chat, model or provider; operation stopped.')
             if self.busy_check({server.proc.pid}):
-                raise ResetError('Codex был открыт. Сброс не запущен.')
-            self._stage(job, 'Создаём новое окно контекста')
+                raise ResetError('Codex was open. Reset not started.')
+            self._stage(job, 'Creating a new context window')
             reset_offset = rollout.stat().st_size
             reset_attempted = True
             server.rpc('thread/compact/start', {'threadId': thread_id})
             completed = server.wait(lambda x: x.get('method') == 'turn/completed' and
                                     x.get('params', {}).get('threadId') == thread_id, 180)
             if completed.get('params', {}).get('turn', {}).get('status') != 'completed':
-                raise ResetError('Codex не завершил сброс.')
+                raise ResetError('Codex did not finish the reset.')
             compacted = [r.get('payload', {}) for r in read_appended(rollout, reset_offset) if r.get('type') == 'compacted']
             if not compacted or not has_fresh_window(compacted[-1]):
-                raise ResetError('Не удалось подтвердить создание нового окна контекста.')
+                raise ResetError('Could not confirm the new context window.')
             job['reset_applied'] = True
             compactions = self.codex.session(thread_id)['analysis'].get('compactions') or []
             if not compactions or compactions[-1].get('mode') != 'reset':
-                raise ResetError('Окно создано, но его запись не найдена для сравнения.')
+                raise ResetError('Window created, but its record was not found for comparison.')
             job['reset_event_index'] = compactions[-1]['event_index']
         except Exception as exc:
-            job['error'] = str(exc) if isinstance(exc, ResetError) else 'Не удалось завершить операцию из-за внутренней ошибки.'
+            job['error'] = str(exc) if isinstance(exc, ResetError) else 'An internal error prevented completion.'
             if reset_attempted and not job.get('reset_applied'):
                 try:
                     new = [r.get('payload', {}) for r in read_appended(rollout, reset_offset) if r.get('type') == 'compacted']
@@ -517,9 +517,9 @@ class ResetController:
                 job.pop('original_settings', None)
             if server and original and settings_overridden:
                 try:
-                    self._stage(job, 'Восстанавливаем настройки чата')
+                    self._stage(job, 'Restoring chat settings')
                 except ResetError:
-                    job['storage_error'] = 'Не удалось сохранить состояние операции.'
+                    job['storage_error'] = 'Could not save operation status.'
                 try:
                     params = {'threadId': thread_id, 'model': original['model'],
                               'effort': original['reasoningEffort'], 'approvalPolicy': original['approvalPolicy']}
@@ -533,44 +533,44 @@ class ResetController:
                     server.rpc('thread/settings/update', params, timeout=20)
                     restored = True
                 except Exception:
-                    job['restore_error'] = 'Не удалось восстановить модель и разрешения чата. Проверьте их в Codex.'
+                    job['restore_error'] = 'Could not restore the chat model and permissions. Check them in Codex.'
             if server:
                 try:
                     server.close()
                 except Exception:
-                    job['restore_error'] = 'Не удалось корректно завершить Codex. Проверьте настройки чата.'
+                    job['restore_error'] = 'Could not shut down Codex cleanly. Check chat settings.'
             if restored and not job.get('restore_error'):
                 verifier = None
                 verified = False
                 try:
                     if self.busy_check():
-                        raise ResetError('Codex уже открыт.')
+                        raise ResetError('Codex is already open.')
                     verifier = AppServer(self.codex.home, cwd, self.executable)
                     verifier.initialize()
                     checked = verifier.rpc('thread/resume', {'threadId': thread_id, 'excludeTurns': True}, timeout=20)
                     if checked.get('thread', {}).get('id') != thread_id or any(checked.get(k) != original.get(k) for k in SETTINGS):
-                        raise ResetError('Настройки отличаются от исходных.')
+                        raise ResetError('Settings differ from the originals.')
                     verified = True
                 except Exception:
-                    job['restore_error'] = 'Не удалось подтвердить восстановление настроек. Проверьте модель и разрешения в Codex.'
+                    job['restore_error'] = 'Could not confirm restored settings. Check the model and permissions in Codex.'
                 finally:
                     if verifier:
                         try:
                             verifier.close()
                         except Exception:
-                            job['restore_error'] = 'Не удалось завершить проверку настроек Codex.'
+                            job['restore_error'] = 'Could not finish checking Codex settings.'
                 if verified and not job.get('restore_error'):
                     job.pop('original_settings', None)
             if isinstance(job.get('original_settings'), dict):
                 job['restore_error'] = recovery_message(job['original_settings'])
             with self.lock:
                 if not job.get('error') and (not job.get('reset_applied') or 'reset_event_index' not in job):
-                    job['error'] = 'Создание окна или его запись не подтверждены.'
+                    job['error'] = 'Window creation or its record was not confirmed.'
                 job['state'] = 'error' if job.get('error') or job.get('restore_error') else 'completed'
-                job['stage'] = 'Готово' if job['state'] == 'completed' else 'Не завершено'
+                job['stage'] = 'Done' if job['state'] == 'completed' else 'Incomplete'
                 job.setdefault('completed_at', datetime.now(timezone.utc).isoformat())
                 self.results[thread_id] = dict(job)
                 try:
                     self._save()
                 except OSError:
-                    job['storage_error'] = 'Результат не удалось сохранить после перезапуска инспектора.'
+                    job['storage_error'] = 'Could not save the result after the inspector restarted.'

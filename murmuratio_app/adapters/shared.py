@@ -47,7 +47,7 @@ def content_action(message):
             detail = inputs.get('command') or inputs.get('description') or inputs.get('file_path') or ''
             return one_line(part.get('name', '')) + (': ' + one_line(detail) if detail else '')
         if part.get('type') == 'tool_result':
-            return 'Результат инструмента'
+            return 'Tool result'
     return ''
 
 

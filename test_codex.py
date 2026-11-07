@@ -12,7 +12,7 @@ class CodexTests(unittest.TestCase):
         (self.home/'sessions').mkdir();self.file=self.home/'sessions/chat.jsonl';self.file.touch()
         c=sqlite3.connect(self.home/'state_5.sqlite')
         c.execute('CREATE TABLE threads(id TEXT,title TEXT,updated_at INTEGER,cwd TEXT,model TEXT,archived INTEGER,source TEXT,agent_path TEXT,tokens_used INTEGER,rollout_path TEXT)')
-        c.execute('INSERT INTO threads VALUES(?,?,?,?,?,?,?,?,?,?)',('chat','Проверка',1,'/project','selected-model',0,'cli','/root',999,str(self.file)))
+        c.execute('INSERT INTO threads VALUES(?,?,?,?,?,?,?,?,?,?)',('chat','Test',1,'/project','selected-model',0,'cli','/root',999,str(self.file)))
         c.commit();c.close();self.source=CodexSource(self.home,sanitize)
     def add(self,t,p):
         with self.file.open('a') as f:f.write(json.dumps({'type':t,'timestamp':'2026-11-02T07:00:00Z','payload':p})+'\n')
@@ -100,7 +100,7 @@ class CodexTests(unittest.TestCase):
         self.assertEqual([e['kind'] for e in result['events'] if e['kind'].startswith('context_')], [])
         self.assertNotIn('reset', json.dumps(result))
         self.assertNotIn('boundary', json.dumps(result))
-        self.assertNotIn('Сброс контекста', json.dumps(result, ensure_ascii=False))
+        self.assertNotIn('Context reset', json.dumps(result, ensure_ascii=False))
 
     def test_counts_not_doubled_and_model_not_inferred(self):
         self.add('turn_context',{'model':'requested','turn_id':'t','effort':'high'})
@@ -196,8 +196,8 @@ class CodexTests(unittest.TestCase):
         from server import make_handler
         c=sqlite3.connect(self.home/'state_5.sqlite')
         c.execute('ALTER TABLE threads ADD COLUMN name TEXT')
-        c.execute("UPDATE threads SET name='Короткое имя'");c.commit();c.close()
-        self.assertEqual(self.source.state()['sessions'][0]['name'],'Короткое имя')
+        c.execute("UPDATE threads SET name='Short name'");c.commit();c.close()
+        self.assertEqual(self.source.state()['sessions'][0]['name'],'Short name')
         server=ThreadingHTTPServer(('127.0.0.1',0),make_handler(self.source,'http://agent-inspector.localhost:1355'))
         thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
         try:

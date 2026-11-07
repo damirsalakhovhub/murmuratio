@@ -55,12 +55,12 @@ class InspectorTests(unittest.TestCase):
 
     def test_now_replaces_invalid_unicode_without_breaking_demo_data(self):
         state = json.loads((Path(__file__).parent / 'fixtures' / 'demo.json').read_text())
-        state['invalid\udcd0'] = 'Текст 😀 \udcd0'
+        state['invalid\udcd0'] = 'Text 😀 \udcd0'
         self.now.state = lambda: state
         status, body, _ = self.request('/api/now')
         self.assertEqual(status, 200)
         result = json.loads(body)
-        self.assertEqual(result.pop('invalid\ufffd'), 'Текст 😀 \ufffd')
+        self.assertEqual(result.pop('invalid\ufffd'), 'Text 😀 \ufffd')
         state.pop('invalid\udcd0')
         self.assertEqual(result, state)
 

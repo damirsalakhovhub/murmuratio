@@ -629,7 +629,7 @@ class NowTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         state = json.loads(response.read())
         self.assertEqual(len(state['agents']), 2)
-        self.assertIn('[СКРЫТО]', state['agents'][0]['task'])
+        self.assertIn('[REDACTED]', state['agents'][0]['task'])
         connection.request('GET', '/api/now', headers={'Origin': 'https://external.example'})
         response = connection.getresponse()
         self.assertEqual(response.status, 403)

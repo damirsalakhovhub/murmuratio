@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -29,54 +29,54 @@
     <div id="now-board" class="now-board"></div>
   </main>
   <div id="workspace" class="workspace" role="tabpanel" aria-labelledby="tab-codex" hidden>
-    <aside class="chats surface surface--2" aria-label="Чаты">
+    <aside class="chats surface surface--2" aria-label="Chats">
       <div id="codex-filters" class="filter-stack">
-        <label class="filter-stack" for="chat-search"><input id="chat-search" class="control input" type="search" autocomplete="off" placeholder="Найти чат или проект" aria-label="Название или проект"></label>
+        <label class="filter-stack" for="chat-search"><input id="chat-search" class="control input" type="search" autocomplete="off" placeholder="Find a chat or project" aria-label="Name or project"></label>
         <div class="sidebar-options">
-        <label class="checkbox-control"><input id="show-archive" type="checkbox">Архив</label>
-        <label class="checkbox-control"><input id="show-agents" type="checkbox">Субагенты</label>
+        <label class="checkbox-control"><input id="show-archive" type="checkbox">Archived</label>
+        <label class="checkbox-control"><input id="show-agents" type="checkbox">Subagents</label>
         </div>
         <p id="chat-count" class="muted" role="status"></p>
       </div>
-      <label class="checkbox-control hidden-chats-filter"><input id="show-hidden" type="checkbox"><span id="hidden-chats-label">Скрытые</span></label>
-      <nav id="chat-list" aria-label="Чаты Codex"><button id="more-chats" class="control button" type="button" hidden>Ещё чаты</button></nav>
+      <label class="checkbox-control hidden-chats-filter"><input id="show-hidden" type="checkbox"><span id="hidden-chats-label">Hidden</span></label>
+      <nav id="chat-list" aria-label="Codex chats"><button id="more-chats" class="control button" type="button" hidden>More chats</button></nav>
     </aside>
-    <div id="sidebar-resizer" role="separator" aria-label="Ширина списка чатов" aria-orientation="vertical" aria-controls="chat-list" tabindex="0"></div>
+    <div id="sidebar-resizer" role="separator" aria-label="Chat list width" aria-orientation="vertical" aria-controls="chat-list" tabindex="0"></div>
     <main class="conversation surface surface--2">
       <header class="conversation-header">
         <div class="conversation-heading">
-          <h2 id="session-title">Выберите чат</h2>
+          <h2 id="session-title">Select a chat</h2>
         </div>
-        <button id="reset-context" class="control button" type="button" hidden>Сбросить контекст</button>
+        <button id="reset-context" class="control button" type="button" hidden>Reset context</button>
       </header>
       <p id="session-error" class="error" role="alert" hidden></p>
       <section id="reset-result" class="reset-result" aria-live="polite" hidden>
         <div id="reset-result-line"></div>
         <p id="reset-result-note" class="muted"></p>
       </section>
-      <section id="analysis" class="analysis" aria-label="Разбор чата" hidden></section>
+      <section id="analysis" class="analysis" aria-label="Chat analysis" hidden></section>
       <details id="event-log" class="event-log" open hidden>
-        <summary id="event-log-summary">События чата</summary>
+        <summary id="event-log-summary">Chat events</summary>
         <div class="event-log-body">
-        <button id="collapse-all" class="control button" type="button" hidden>Свернуть все ответы</button>
-      <button id="older-events" class="control button" type="button" hidden>Ранее</button>
-      <div id="feed" tabindex="0" aria-label="Сообщения и события чата"></div>
-      <button id="new-events" class="control button button--primary" type="button" hidden>Новые события ↓</button>
+        <button id="collapse-all" class="control button" type="button" hidden>Collapse all replies</button>
+      <button id="older-events" class="control button" type="button" hidden>Earlier</button>
+      <div id="feed" tabindex="0" aria-label="Chat messages and events"></div>
+      <button id="new-events" class="control button button--primary" type="button" hidden>New events ↓</button>
         </div>
       </details>
     </main>
   </div>
   <dialog id="reset-dialog" aria-labelledby="reset-title" aria-describedby="reset-description">
     <div class="reset-dialog-content">
-      <h2 id="reset-title">Создать новое окно контекста?</h2>
-      <p id="reset-description">Эксперимент: чат <strong id="reset-chat-name"></strong> сохранит ID и историю, а часть старых сообщений останется в служебных данных. Агент может получить к ним доступ. Это не то же самое, что новый чат.</p>
-      <p>Контрольные вопросы отправляете вы сами. После операции откройте чат и отправьте тот же короткий вопрос без инструментов на прежней модели, чтобы сравнить объём контекста.</p>
+      <h2 id="reset-title">Create a new context window?</h2>
+      <p id="reset-description">Experiment: chat <strong id="reset-chat-name"></strong> will keep its ID and history. Some old messages will remain in internal data that the agent may access. This differs from starting a new chat.</p>
+      <p>You send the test questions yourself. After the operation, open the chat and send the same short question without tools on the same model to compare context size.</p>
       <p id="reset-compaction" class="muted" hidden></p>
-      <p>Для безопасности откройте инспектор в Chrome или Safari, завершите задачи и закройте приложение ChatGPT / Codex и остальные процессы Codex. Не открывайте их до окончания сброса.</p>
+      <p>For safety, open the inspector in Chrome or Safari, finish tasks and close ChatGPT / Codex and all other Codex processes. Keep them closed until the reset finishes.</p>
       <p id="reset-dialog-status" class="muted" role="status"></p>
       <div class="reset-dialog-actions">
-        <button id="reset-cancel" class="control button" type="button">Отмена</button>
-        <button id="reset-confirm" class="control button button--danger" type="button" disabled>Создать окно</button>
+        <button id="reset-cancel" class="control button" type="button">Cancel</button>
+        <button id="reset-confirm" class="control button button--danger" type="button" disabled>Create window</button>
       </div>
     </div>
   </dialog>

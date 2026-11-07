@@ -148,7 +148,7 @@ class ResetTests(unittest.TestCase):
 
     def test_interrupted_job_is_reported_as_unknown_after_restart(self):
         original={'model':'original','reasoningEffort':'high','approvalPolicy':'never','sandbox':{'type':'readOnly'}}
-        self.controller.results[ID]={'thread_id':ID,'state':'running','stage':'Сбрасываем контекст','reset_applied':False,'original_settings':original}
+        self.controller.results[ID]={'thread_id':ID,'state':'running','stage':'Resetting context','reset_applied':False,'original_settings':original}
         self.controller._save()
         restarted=ResetController(self.codex,self.directory,busy_check=lambda ignored=():False,executable=self.exe,
                                   version_check=lambda _:VERIFIED_VERSION)
@@ -172,7 +172,7 @@ class ResetTests(unittest.TestCase):
     def test_denied_client_tool_request_stops_rpc(self):
         server=AppServer.__new__(AppServer);server.seq=0;server.blocked_tool=True
         server.send=lambda value:None;server.wait=lambda predicate,timeout:{'id':1,'result':{}}
-        with self.assertRaisesRegex(ResetError,'неподдерживаемое действие'):server.rpc('test',{})
+        with self.assertRaisesRegex(ResetError,'unsupported action'):server.rpc('test',{})
 
     def test_readiness_and_bound_one_time_challenge(self):
         original=self.rollout.read_text()

@@ -16,15 +16,15 @@ ROOT = Path(__file__).resolve().parent
 SECRET_KEY = re.compile(r'^(?:authorization|proxy.authorization|cookie|set.cookie|.*(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password))$', re.I)
 INVALID_UNICODE = re.compile(r'[\ud800-\udfff]')
 SECRET_TEXT = [
-    (re.compile(r'(?i)\b(Bearer\s+)[A-Za-z0-9._~+/-]+=*'), r'\1[СКРЫТО]'),
-    (re.compile(r'\b(?:sk-[A-Za-z0-9_-]{12,}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)'), '[СКРЫТО]'),
-    (re.compile(r'''(?im)((?:["']?)(?:authorization|proxy-authorization|cookie|set-cookie|[\w-]*(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password))["']?\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s,}\n]+)'''), r'\1[СКРЫТО]'),
+    (re.compile(r'(?i)\b(Bearer\s+)[A-Za-z0-9._~+/-]+=*'), r'\1[REDACTED]'),
+    (re.compile(r'\b(?:sk-[A-Za-z0-9_-]{12,}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)'), '[REDACTED]'),
+    (re.compile(r'''(?im)((?:["']?)(?:authorization|proxy-authorization|cookie|set-cookie|[\w-]*(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password))["']?\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s,}\n]+)'''), r'\1[REDACTED]'),
 ]
 
 
 def sanitize(value):
     if isinstance(value, dict):
-        return {k: '[СКРЫТО]' if SECRET_KEY.match(k) else sanitize(v) for k, v in value.items()}
+        return {k: '[REDACTED]' if SECRET_KEY.match(k) else sanitize(v) for k, v in value.items()}
     if isinstance(value, list):
         return [sanitize(v) for v in value]
     if isinstance(value, str):
@@ -73,7 +73,7 @@ def make_handler(codex=None, public_url=None, reset=None, now=None, config=None)
             if write:
                 ok = ok and self.headers.get('X-Inspector-Action') == '1' and self.headers.get('Content-Type', '').split(';')[0] == 'application/json'
             if not ok:
-                self.send_data(403, {'error': 'Разрешён только локальный same-origin доступ'})
+                self.send_data(403, {'error': 'Only local same-origin access is allowed'})
             return ok
 
         def do_GET(self):
@@ -96,7 +96,7 @@ def make_handler(codex=None, public_url=None, reset=None, now=None, config=None)
                         state = codex.state()
                         status = 503 if state.get('source', {}).get('connected') is False else 200
                         if status == 503:
-                            state['error'] = 'Источник недоступен или формат несовместим. Повторяем чтение.'
+                            state['error'] = 'Source unavailable or format unsupported. Retrying.'
                         self.send_data(status, state)
                     elif parsed.path.endswith('/event'):
                         self.send_data(200, codex.event_text(query.get('id', [''])[0], query.get('event', [''])[0]))
@@ -120,13 +120,13 @@ def make_handler(codex=None, public_url=None, reset=None, now=None, config=None)
                         body = body.replace(b'  <!-- murmuratio-branding -->', branding.rstrip(b'\n'))
                     self.send_data(200, body, ct)
                 else:
-                    self.send_data(404, {'error': 'Не найдено'})
+                    self.send_data(404, {'error': 'Not found'})
             except (BrokenPipeError, ConnectionResetError):
                 return
             except KeyError:
-                self.send_data(404, {'error': 'Чат не найден'})
+                self.send_data(404, {'error': 'Chat not found'})
             except (sqlite3.Error, OSError, ValueError, TypeError, AttributeError, OverflowError) as exc:
-                response = {'error': 'Источник недоступен или формат несовместим. Повторяем чтение.'}
+                response = {'error': 'Source unavailable or format unsupported. Retrying.'}
                 if parsed.path in ('/api/codex/state', '/api/codex/session', '/api/codex/event'):
                     status = 'unavailable' if isinstance(exc, OSError) else 'unsupported'
                     if isinstance(exc, sqlite3.OperationalError):
@@ -137,14 +137,14 @@ def make_handler(codex=None, public_url=None, reset=None, now=None, config=None)
             except Exception:
                 if parsed.path not in ('/api/codex/state', '/api/codex/session', '/api/codex/event'):
                     raise
-                self.send_data(503, {'error': 'Источник недоступен. Повторяем чтение.',
+                self.send_data(503, {'error': 'Source unavailable. Retrying.',
                                      'source': {'name': 'codex_sessions', 'status': 'unavailable'}})
 
         def do_POST(self):
             if not self.allowed(write=True):
                 return
             if self.path.startswith('/api/codex/reset/') and self.headers.get('Origin') != 'http://' + str(self.headers.get('Host')):
-                self.send_data(403, {'error': 'Для сброса требуется локальная страница инспектора.'})
+                self.send_data(403, {'error': 'Reset requires a local inspector page.'})
                 return
             try:
                 n = int(self.headers.get('Content-Length', '0'))
@@ -156,13 +156,13 @@ def make_handler(codex=None, public_url=None, reset=None, now=None, config=None)
                 elif self.path == '/api/codex/reset/start' and reset and (config is None or config.modules['codex_chats'] and config.modules['context_reset']):
                     self.send_data(202, reset.start(data.get('id'), data.get('token')))
                 else:
-                    self.send_data(400, {'error': 'Неизвестная операция'})
+                    self.send_data(400, {'error': 'Unknown operation'})
             except (ValueError, TypeError, AttributeError):
-                self.send_data(400, {'error': 'Некорректные данные'})
+                self.send_data(400, {'error': 'Invalid data'})
             except ResetError as exc:
                 self.send_data(409, {'error': str(exc)})
             except (OSError, sqlite3.Error):
-                self.send_data(503, {'error': 'Не удалось сохранить состояние сброса'})
+                self.send_data(503, {'error': 'Could not save reset status'})
     return Handler
 
 

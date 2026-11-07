@@ -93,7 +93,7 @@ const service = spawn('python3', ['-B', 'server.py', '--port', '0', '--config', 
     assert.equal(await page.$eval('[data-agent-id="atlas"] .now-context', e => e.hidden), true);
     assert.deepEqual(await page.$$eval('#now-summary > span', es => es.map(e => e.textContent)), ['3 running', '0 needs you', '2 done today']);
     assert.deepEqual(await page.$$eval('[data-project="Atlas"] .now-counts > span', es => es.map(e => e.textContent)), ['1 running', '1 done']);
-    assert.equal(await page.$eval('#now-view', e => /987654|REPORT DUMP|Контекст|Сейчас/.test(e.textContent)), false);
+    assert.equal(await page.$eval('#now-view', e => /987654|REPORT DUMP|Context|Now/.test(e.textContent)), false);
     assert.equal(await page.$eval('[data-agent-id="atlas"]', e => getComputedStyle(e).boxShadow.includes('1.5px')), false);
     assert.equal(await value('atlas', '.now-word'), 'Quiet');
     assert.equal(await page.$$eval('.now-tree path', es => es.length), 3);
