@@ -2,9 +2,11 @@
 import json
 from pathlib import Path
 from murmuratio_app.adapters.base import Adapter, UnavailableSource
-from murmuratio_app.adapters.parsing import consume_claude
+from murmuratio_app.adapters.activity import working_seconds
+from murmuratio_app.adapters.parsing import consume_claude, consume_claude_sidechain
 from murmuratio_app.adapters.shared import claude_context_window, claude_label, claude_status
 from murmuratio_app.common import one_line
+from murmuratio_app.grouping import codex_launch_matches
 
 
 class ClaudeDesktopAdapter(Adapter):
@@ -55,9 +57,10 @@ class ClaudeSessionsAdapter(Adapter):
         self.root = Path(root)
         self.summary, self.cache, self.project = summary, cache, project
 
-    def collect(self, now, desktop, seen):
+    def collect(self, now, desktop, seen, active_codex=None):
         if not self.root.is_dir():
             raise UnavailableSource()
+        sessions = {}
         for path in self.root.glob('*/*.jsonl'):
             try:
                 modified = path.stat().st_mtime
@@ -79,11 +82,13 @@ class ClaudeSessionsAdapter(Adapter):
                 approval = not status and meta and data.get('last_turn') == 'tool_use' and 600 < now - modified < 86400
                 if approval:
                     status = 'blocked'
+                pending = not status and bool(active_codex)
+                if pending:
+                    status = 'waiting'
                 if not status:
                     continue
                 cwd = data.get('cwd') or meta.get('cwd') or ''
                 started = data.get('started')
-                end = data.get('last_at') if status == 'done' else now
                 model = data.get('model') or one_line(meta.get('model'))
                 session = dict(id='claude:' + path.stem, kind='claude', who=claude_label(model),
                                model=model, cwd=cwd, folder=Path(cwd).name or '—', project=self.project(cwd),
@@ -95,12 +100,35 @@ class ClaudeSessionsAdapter(Adapter):
                                waiting_since=data.get('waiting_since'), app_session=meta.get('app_session'),
                                parent_session=parent_session,
                                last_at=data.get('last_at') or modified,
-                               seconds=max(0, (end or now) - started) if started is not None else None,
+                               seconds=working_seconds(data, now, status, started, data.get('last_at')),
                                context_tokens=data.get('context_tokens'), context_used=data.get('context_tokens'),
-                               context_window=claude_context_window(data, model))
-                # Status and some context fallbacks are inferred from saved events.
-                yield self.observation(session, data.get('last_at') or modified, 'inferred')
+                               context_window=claude_context_window(data, model),
+                               _codex_launches=list(data.get('_codex_launches', [])), _codex_pending=pending)
+                sessions[path.stem] = session
             except OSError:
                 self.unavailable()
             except (ValueError, TypeError, OverflowError, AttributeError):
                 self.unsupported()
+        for path in self.root.glob('*/*/subagents/*.jsonl'):
+            parent = sessions.get(path.parent.parent.name)
+            if not parent:
+                continue
+            try:
+                if now - path.stat().st_mtime > 86400:
+                    continue
+                seen.add(path)
+                data, _ = self.summary(path, consume_claude_sidechain)
+                parent['_codex_launches'].extend(data.get('_codex_launches', []))
+            except OSError:
+                self.unavailable()
+            except (ValueError, TypeError, OverflowError, AttributeError):
+                self.unsupported()
+        for session_id, session in sessions.items():
+            if session['_codex_pending'] and not any(
+                    agent.get('parent_session') == session_id or
+                    agent.get('parent_app_session') == session.get('app_session') and session.get('app_session') or
+                    any(codex_launch_matches(agent, call, exact=True) for call in session['_codex_launches'])
+                    for agent in active_codex):
+                continue
+            # Status and some context fallbacks are inferred from saved events.
+            yield self.observation(session, session.get('last_at'), 'inferred')

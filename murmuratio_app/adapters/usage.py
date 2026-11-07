@@ -49,8 +49,12 @@ class CodexMeterAdapter(Adapter):
         if not self.root.is_dir():
             raise UnavailableSource()
         seen = set()
+        root = self.root.resolve()
         for path in self.root.glob('*/*/*/rollout-*.jsonl'):
             try:
+                if not path.resolve().is_relative_to(root):
+                    self.unsupported()
+                    continue
                 if path.stat().st_mtime < now - 60 * 86400:
                     continue
                 seen.add(path)

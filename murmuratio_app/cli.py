@@ -1,22 +1,25 @@
 """Install, remove, diagnose and run the local inspector."""
 import argparse
+import base64
+import binascii
 import ctypes
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
 import plistlib
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
 import time
 from urllib.parse import urlsplit
 
+from murmuratio_app import __version__
 from murmuratio_app.discovery import Discovery
 from murmuratio_app.common import PlainArgumentParser
-from murmuratio_config import Config, MODULES
+from murmuratio_app.config import Config, MODULES
 
 ROOT = Path(__file__).resolve().parent.parent
 LABEL = 'org.murmuratio.app'
@@ -238,6 +241,54 @@ def load_state(paths):
     return state
 
 
+def file_identity(path):
+    if path.is_symlink():
+        return None
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        return None
+    return [info.st_dev, info.st_ino] if path.is_file() else None
+
+
+def sole_owned_file(path, identity):
+    if not identity or file_identity(path) != identity:
+        return False
+    try:
+        return path.stat().st_nlink == 1
+    except FileNotFoundError:
+        return False
+
+
+def recover_hook_install(paths, state, dry_run=False):
+    """Resolve an interrupted statusLine install without touching changed settings."""
+    phase = state.get('hook_install') if state else None
+    if phase is None:
+        return state
+    if (not isinstance(phase, dict) or not isinstance(phase.get('after_sha'), str)
+            or not (phase.get('before_sha') is None or isinstance(phase.get('before_sha'), str))):
+        raise InstallError('Invalid statusLine installation record; installation data was retained')
+    current, settings = settings_bytes(paths.settings)
+    current_sha = sha(current) if current is not None else None
+    status = settings.get('statusLine')
+    installed = isinstance(status, dict) and status.get('command') == state['command']
+    result = dict(state)
+    if current_sha == phase['after_sha'] or installed:
+        result.pop('hook_install', None)
+    elif current_sha == phase['before_sha']:
+        if (not dry_run and sole_owned_file(paths.backup, state.get('backup_identity')) and
+                sha(paths.backup.read_bytes()) == state.get('backup_sha')):
+            paths.backup.unlink()
+        result.update(hook_installed=False, settings_existed=False, command='', installed_settings_sha='', backup_sha=None)
+        for key in ('hook_install', 'backup_identity', 'backup_inline'):
+            result.pop(key, None)
+    else:
+        raise InstallError('settings.json changed during statusLine installation; installation record was retained')
+    if not dry_run:
+        save_state(paths, result)
+    return result
+
+
 def old_command(settings):
     status = settings.get('statusLine')
     if status is None:
@@ -263,7 +314,8 @@ def read_plan(paths, config, demo=False, config_path=None):
         return
     found = Discovery.at(paths.home, config)
     for path in (config_path or paths.config, found.claude_limits, found.claude_limits_legacy,
-                 found.claude_sessions / '*/*.jsonl', found.claude_desktop / '*/*/local_*.json',
+                 found.claude_sessions / '*/*.jsonl', found.claude_sessions / '*/*/subagents/*.jsonl',
+                 found.claude_desktop / '*/*/local_*.json',
                  found.codex_rollouts / '*/*/*/rollout-*.jsonl'):
         print(f'  {path}')
     if config.modules['codex_wrapper']:
@@ -277,8 +329,6 @@ def read_plan(paths, config, demo=False, config_path=None):
         print('  Rollout paths referenced by the Codex database')
     if config.modules['forecast'] or config.modules['routing']:
         print(f'  {config.limits_history}')
-    if config.modules['burn_rate'] or config.modules['scenarios'] and config.modules['forecast']:
-        print(f'  {found.claude_sessions}/*/*/subagents/*.jsonl')
     if config.modules['context_reset'] and config.modules['codex_chats']:
         print(f'  {paths.data}/reset/reset-results.json (or legacy {paths.data}/reset-results.json)')
         print(f'  {found.codex_home}/goals_1.sqlite (on context reset)')
@@ -310,11 +360,19 @@ def installation_plan(paths, config, args, state, original):
         if original is not None:
             print(f'  create backup: {paths.backup}')
         print(f'  create: {paths.state}')
-        print(f'  {"change" if original is not None else "create"}: {paths.settings}')
+        if paths.settings.parent.is_dir():
+            print(f'  {"change" if original is not None else "create"}: {paths.settings}')
+        else:
+            print('  Claude statusLine skipped: Claude directory not found')
         if not planned_config(paths).exists():
             print(f'  create: {paths.config}')
     else:
         print('  Existing installation is retained.')
+        if not state.get('hook_installed', True) and paths.settings.parent.is_dir():
+            if original is not None:
+                print(f'  save settings backup in: {paths.state}')
+            print(f'  {"change" if original is not None else "create"}: {paths.settings}')
+            print(f'  change: {paths.state}')
         if state.get('agent_sha'):
             agent, label = owned_agent(paths, state)
             if label == LEGACY_LABEL:
@@ -424,7 +482,7 @@ def migrate_agent(paths, state):
 
 
 def validate_install(paths, args):
-    state = load_state(paths)
+    state = recover_hook_install(paths, load_state(paths), args.dry_run)
     original, settings = settings_bytes(paths.settings)
     config_path = planned_config(paths)
     if config_path.is_symlink():
@@ -433,8 +491,10 @@ def validate_install(paths, args):
     if state:
         if state.get('uninstall') is not None:
             raise InstallError('Uninstallation is incomplete; run uninstall again first')
-        if not isinstance(settings.get('statusLine'), dict) or settings['statusLine'].get('command') != state['command']:
+        if state.get('hook_installed', True) and (not isinstance(settings.get('statusLine'), dict) or settings['statusLine'].get('command') != state['command']):
             raise InstallError('The installed statusLine was changed; restore it before reinstalling')
+        if not state.get('hook_installed', True) and paths.settings.parent.is_dir():
+            old_command(settings)
         if state.get('agent_sha') and owned_agent(paths, state)[1] == LEGACY_LABEL:
             check_agent_available(paths)
     else:
@@ -452,40 +512,81 @@ def install(paths, args):
         installation_plan(paths, config, args, state, original)
         return
     if state is None:
-        command = wrapper_command(old_command(settings))
+        use_hook = paths.settings.parent.is_dir()
+        command = wrapper_command(old_command(settings)) if use_hook else ''
         status = dict(settings['statusLine']) if isinstance(settings.get('statusLine'), dict) else {'type': 'command'}
         status['command'] = command
-        new_settings = patch_status(original if original is not None else b'{}\n', json.dumps(status, ensure_ascii=False))
+        new_settings = patch_status(original if original is not None else b'{}\n', json.dumps(status, ensure_ascii=False)) if use_hook else None
         state = {'version': 1, 'settings_existed': original is not None, 'command': command,
-                 'installed_settings_sha': sha(new_settings), 'created_config': not paths.config.exists(),
-                 'backup_sha': sha(original) if original is not None else None}
+                 'installed_settings_sha': sha(new_settings) if use_hook else '', 'created_config': not paths.config.exists(),
+                 'backup_sha': sha(original) if original is not None else None, 'hook_installed': use_hook}
+        if use_hook:
+            state['hook_install'] = {'before_sha': sha(original) if original is not None else None,
+                                     'after_sha': sha(new_settings)}
         # The original is backed up before the settings file is touched.
         backup_created = state_created = config_created = False
         try:
             if original is not None:
                 create_new(paths.backup, original)
                 backup_created = True
+                state['backup_identity'] = file_identity(paths.backup)
             create_new(paths.state, (json.dumps(state, indent=2) + '\n').encode())
             state_created = True
             if state['created_config']:
                 create_new(paths.config, DEFAULT_CONFIG)
                 config_created = True
-            current, _ = settings_bytes(paths.settings)
-            if current != original:
-                raise InstallError('settings.json changed during installation; no settings were overwritten')
-            mode = paths.settings.stat().st_mode & 0o777 if original is not None else 0o600
-            atomic_write(paths.settings, new_settings, mode)
+                state['created_config_identity'] = file_identity(paths.config)
+                save_state(paths, state)
+            if use_hook:
+                current, _ = settings_bytes(paths.settings)
+                if current != original:
+                    raise InstallError('settings.json changed during installation; no settings were overwritten')
+                mode = paths.settings.stat().st_mode & 0o777 if original is not None else 0o600
+                atomic_write(paths.settings, new_settings, mode)
+                state.pop('hook_install', None)
+                save_state(paths, state)
         except Exception:
-            if config_created and paths.config.exists() and paths.config.read_bytes() == DEFAULT_CONFIG:
+            current = settings_bytes(paths.settings)[0] if use_hook else None
+            if use_hook and current != original:
+                # The hook may have been installed; retain its journal and backup.
+                raise
+            if config_created and sole_owned_file(paths.config, state.get('created_config_identity')) and paths.config.read_bytes() == DEFAULT_CONFIG:
                 paths.config.unlink()
             if state_created and paths.state.exists():
                 paths.state.unlink()
-            if backup_created and paths.backup.exists():
+            if backup_created and sole_owned_file(paths.backup, state.get('backup_identity')):
                 paths.backup.unlink()
             raise
-        print('Installed statusLine wrapper.')
+        print('Installed statusLine wrapper.' if use_hook else 'Installed without a Claude statusLine.')
     else:
-        print('Already installed.')
+        if not state.get('hook_installed', True) and paths.settings.parent.is_dir():
+            command = wrapper_command(old_command(settings))
+            status = dict(settings['statusLine']) if isinstance(settings.get('statusLine'), dict) else {'type': 'command'}
+            status['command'] = command
+            updated = patch_status(original if original is not None else b'{}\n', json.dumps(status, ensure_ascii=False))
+            state.update(hook_installed=True, settings_existed=original is not None, command=command,
+                         installed_settings_sha=sha(updated), backup_sha=sha(original) if original is not None else None)
+            if original is not None:
+                state['backup_inline'] = base64.b64encode(original).decode('ascii')
+            state['hook_install'] = {'before_sha': sha(original) if original is not None else None,
+                                     'after_sha': sha(updated)}
+            try:
+                if settings_bytes(paths.settings)[0] != original:
+                    raise InstallError('settings.json changed during installation; no settings were overwritten')
+                save_state(paths, state)
+                mode = paths.settings.stat().st_mode & 0o777 if original is not None else 0o600
+                atomic_write(paths.settings, updated, mode)
+                state.pop('hook_install', None)
+                save_state(paths, state)
+            except Exception:
+                try:
+                    recover_hook_install(paths, load_state(paths))
+                except (InstallError, OSError):
+                    pass
+                raise
+            print('Installed statusLine wrapper.')
+        else:
+            print('Already installed.')
     if state.get('agent_sha'):
         migrate_agent(paths, state)
     if args.launch_agent and not state.get('agent_sha'):
@@ -495,30 +596,26 @@ def install(paths, args):
 
 def remove_installation_files(paths):
     """Keep the recovery record until all other cleanup has succeeded."""
-    data_with_record = paths.install.parent
-    for directory in (paths.config_dir, paths.legacy_config_dir, paths.data, paths.legacy_data):
-        if not directory.exists():
-            continue
-        if directory != data_with_record:
-            shutil.rmtree(directory)
-            continue
-        for item in directory.iterdir():
-            if item == paths.install:
-                continue
-            if item.is_dir() and not item.is_symlink():
-                shutil.rmtree(item)
-            else:
-                item.unlink()
-    for item in paths.install.iterdir():
-        if item == paths.state:
-            continue
-        if item.is_dir() and not item.is_symlink():
-            shutil.rmtree(item)
-        else:
-            item.unlink()
+    state = load_state(paths)
+    identity = state.get('created_config_identity')
+    if state['created_config'] and identity:
+        for config in (paths.config, paths.legacy_config_dir / 'config.toml'):
+            if sole_owned_file(config, identity) and config.read_bytes() == DEFAULT_CONFIG:
+                config.unlink()
+                break
+    if (state.get('hook_installed', True) and state.get('settings_existed') and
+            sole_owned_file(paths.backup, state.get('backup_identity')) and
+            sha(paths.backup.read_bytes()) == state.get('backup_sha')):
+        paths.backup.unlink()
     paths.state.unlink()
-    paths.install.rmdir()
-    data_with_record.rmdir()
+    for directory in (paths.install, paths.install.parent, paths.config_dir, paths.legacy_config_dir):
+        try:
+            directory.rmdir()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+                raise
 
 
 def uninstall(paths, args):
@@ -529,28 +626,26 @@ def uninstall(paths, args):
     if state is not None and paths.install.is_symlink():
         raise InstallError(f'Refusing to use installation directory symlink: {paths.install}')
     if state is None:
-        if args.dry_run:
-            print('Would remove old and new configuration and data directories.')
-            return
-        for directory in (paths.config_dir, paths.legacy_config_dir, paths.data, paths.legacy_data):
-            if directory.exists():
-                shutil.rmtree(directory)
-        print('Removed configuration and data.')
+        print('No installation record; existing files retained.')
         return
 
+    state = recover_hook_install(paths, state, args.dry_run)
+
     phase = state.get('uninstall')
-    if phase is not None and (not isinstance(phase, dict) or not isinstance(phase.get('before_sha'), str)
+    if phase is not None and (not isinstance(phase, dict) or not (phase.get('before_sha') is None or isinstance(phase.get('before_sha'), str))
                               or not (phase.get('after_sha') is None or isinstance(phase.get('after_sha'), str))
                               or phase.get('agent_label') not in (None, LABEL, LEGACY_LABEL)):
         raise InstallError('Invalid uninstallation record; installation data was retained')
-    current, settings = settings_bytes(paths.settings)
+    use_hook = state.get('hook_installed', True)
+    current, settings = settings_bytes(paths.settings) if use_hook else (None, {})
     current_sha = sha(current) if current is not None else None
-    restored_already = phase is not None and current_sha == phase['after_sha']
+    restored_already = not use_hook or phase is not None and current_sha == phase['after_sha']
     if phase is not None and not restored_already and current_sha != phase['before_sha']:
         raise InstallError('settings.json changed during uninstallation; installation record was retained')
 
     restored = None
     backup = None
+    after_sha = None
     if not restored_already:
         if current is None:
             raise InstallError('settings.json is missing; installation record and backup were retained')
@@ -558,12 +653,18 @@ def uninstall(paths, args):
         if not isinstance(status, dict) or status.get('command') != state['command']:
             raise InstallError('The installed statusLine was changed; installation record and backup were retained')
         if state['settings_existed']:
-            if paths.backup.is_symlink():
-                raise InstallError('Settings backup is a symlink; installation record was retained')
-            try:
-                backup = paths.backup.read_bytes()
-            except FileNotFoundError as exc:
-                raise InstallError('Settings backup is missing; installation record was retained') from exc
+            if 'backup_inline' in state:
+                try:
+                    backup = base64.b64decode(state['backup_inline'], validate=True)
+                except (ValueError, TypeError, binascii.Error) as exc:
+                    raise InstallError('Settings backup is invalid; installation record was retained') from exc
+            else:
+                if paths.backup.is_symlink():
+                    raise InstallError('Settings backup is a symlink; installation record was retained')
+                try:
+                    backup = paths.backup.read_bytes()
+                except FileNotFoundError as exc:
+                    raise InstallError('Settings backup is missing; installation record was retained') from exc
             if sha(backup) != state.get('backup_sha'):
                 raise InstallError('Settings backup has changed; installation record was retained')
             json_object(backup, str(paths.backup))
@@ -593,9 +694,10 @@ def uninstall(paths, args):
     if args.dry_run:
         print(f'Uninstaller reads: {paths.settings}, {paths.config}, {paths.state}, {paths.backup}')
         print('Uninstallation files:')
-        print(f'  restore or remove: {paths.settings}')
-        for directory in (paths.config_dir, paths.legacy_config_dir, paths.data, paths.legacy_data):
-            print(f'  remove: {directory}')
+        if use_hook:
+            print(f'  restore or remove: {paths.settings}')
+        print(f'  remove owned installation records: {paths.install}')
+        print(f'  remove unchanged installer-created config: {paths.config}')
         if agent:
             print(f'  unload and remove: {agent}')
         read_plan(paths, Config.load(paths.home))
@@ -611,7 +713,7 @@ def uninstall(paths, args):
         if subprocess.run(['launchctl', 'print', target], capture_output=True).returncode == 0:
             if subprocess.run(['launchctl', 'bootout', target], capture_output=True).returncode:
                 raise InstallError('Could not unload LaunchAgent; installation record was retained')
-    if settings_bytes(paths.settings)[0] != current:
+    if use_hook and settings_bytes(paths.settings)[0] != current:
         raise InstallError('settings.json changed during uninstallation; installation record was retained')
     if not restored_already:
         if restored is None:
@@ -621,11 +723,11 @@ def uninstall(paths, args):
     if agent:
         agent.unlink()
     remove_installation_files(paths)
-    print('Restored previous statusLine.')
+    print('Restored previous statusLine.' if use_hook else 'Removed installation records.')
 
 
 def doctor(paths):
-    from now_source import NowSource
+    from murmuratio_app.now import NowSource
     from murmuratio_app.adapters.codex_sessions import CodexSource
     config = Config.load(paths.home)
     source = NowSource(home=paths.home, config=config)
@@ -666,6 +768,7 @@ def port_number(value):
 
 def main(argv=None):
     parser = PlainArgumentParser(description=__doc__)
+    parser.add_argument('--version', action='version', version=f'murmuratio {__version__}')
     commands = parser.add_subparsers(dest='command', required=True)
     install_parser = commands.add_parser('install')
     install_parser.add_argument('--launch-agent', action='store_true', help='Also install and load a macOS LaunchAgent')
@@ -724,12 +827,13 @@ def main(argv=None):
                     raise InstallError('A valid Portless port is required') from exc
             else:
                 os.environ.pop('PORTLESS_URL', None)
-            command = [sys.executable, '-B', str(ROOT / 'server.py'), '--port', str(args.port), '--data-dir', str(paths.data)]
+            from murmuratio_app.server import main as serve
+            command = ['--port', str(args.port), '--data-dir', str(paths.data)]
             if args.config:
                 command.extend(['--config', str(args.config)])
             if args.demo:
                 command.append('--demo')
-            os.execv(sys.executable, command)
+            serve(command)
     except (InstallError, OSError, ValueError) as exc:
         message = str(exc).splitlines()
         print('Error: ' + (message[0] if message else type(exc).__name__), file=sys.stderr)

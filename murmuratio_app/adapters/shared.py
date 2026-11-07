@@ -4,10 +4,13 @@ from pathlib import Path
 import re
 from murmuratio_app.common import one_line, timestamp
 
+CODEX_DEAD_SECONDS = 30 * 60
+
+
 def codex_status(run, now, last_event, alive):
     if run.get('status') == 'done':
-        return 'blocked' if one_line(run.get('verdict')).startswith('BLOCKED') else 'done'
-    if not alive:
+        return 'crashed' if one_line(run.get('verdict')).startswith('CRASHED') else 'done'
+    if alive is False:
         return 'crashed'
     activity = last_event if last_event is not None else timestamp(run.get('started'))
     return 'hung' if activity is not None and now - activity > 600 else 'working'

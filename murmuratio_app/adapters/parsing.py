@@ -1,10 +1,63 @@
 """Normalize Claude and Codex source records."""
 import math
+from pathlib import Path
+import re
+import shlex
 from murmuratio_app.common import one_line, timestamp
 from murmuratio_app.adapters.shared import (current_action, content_action, context_number)
 from murmuratio_app.adapters.limits import limit_window
+from murmuratio_app.adapters.activity import start_turn, record_activity, end_turn
 
 from murmuratio_app.metrics.usage import USAGE_WEIGHTS, add_usage
+
+
+def codex_launch(command, cwd, at):
+    """Record only identity, location and time, never the shell command itself."""
+    if not isinstance(command, str):
+        return None
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=';&|()')
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return None
+    executable = next((index for index, token in enumerate(tokens) if Path(token).name == 'codex'), None)
+    if executable is None:
+        return None
+    end = next((index for index in range(executable + 1, len(tokens))
+                if tokens[index] and all(c in ';&|()' for c in tokens[index])), len(tokens))
+    execute = next((index for index in range(executable + 1, end) if tokens[index] == 'exec'), None)
+    if execute is None:
+        return None
+    launch_cwd = cwd
+    for index, token in enumerate(tokens):
+        target = None
+        if token == 'cd' and index < executable and index + 1 < len(tokens):
+            target = tokens[index + 1]
+        elif token in ('-C', '--cd') and executable < index < end and index + 1 < end:
+            target = tokens[index + 1]
+        elif token.startswith('--cd=') and executable < index < end:
+            target = token[5:]
+        if target:
+            launch_cwd = str(Path(launch_cwd) / target) if launch_cwd and not Path(target).is_absolute() else target
+    return {'at': at, 'cwd': str(Path(launch_cwd)) if launch_cwd else '', 'thread': None}
+
+
+def recorded_thread(value):
+    if isinstance(value, list):
+        return next((found for item in value if (found := recorded_thread(item))), None)
+    if isinstance(value, dict):
+        thread = value.get('thread_id') or value.get('threadId')
+        if isinstance(thread, str) and thread:
+            return thread
+        return recorded_thread(value.get('content') or value.get('text'))
+    if not isinstance(value, str):
+        return None
+    match = re.search(r'(?i)\bthread[_ -]?id["\']?\s*[:=]\s*["\']?([a-z0-9_-]+)', value[:131072])
+    if match:
+        return match.group(1)
+    match = re.search(r'rollout-[^\s"\']*?([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.jsonl', value[:131072], re.I)
+    return match.group(1) if match else None
 
 def consume_usage(data, record, include_models=True):
     """Normalize an assistant message before passing it to the usage metric."""
@@ -71,6 +124,19 @@ def consume_codex_meter(data, record, include_credits=True, include_burn=True):
 
 
 def consume_codex(data, record):
+    at = timestamp(record.get('timestamp'))
+    event = record.get('payload') if record.get('type') == 'event_msg' else record
+    event_type = event.get('type') if isinstance(event, dict) else None
+    if event_type in ('task_started', 'turn_started', 'turn.started'):
+        start_turn(data, at)
+    if at is not None and event_type != 'thread_settings_applied':
+        data['last_at'] = at
+        # Resume setup can arrive hours after the previous turn's last work.
+        if record.get('type') not in ('session_meta', 'turn_context'):
+            record_activity(data, at)
+    if event_type in ('task_complete', 'turn_complete', 'turn.completed',
+                      'turn_aborted', 'task_aborted', 'turn.failed'):
+        end_turn(data, at)
     if record.get('type') == 'thread.started':
         data['thread'] = record.get('thread_id')
     item = record.get('item')
@@ -126,17 +192,32 @@ def consume_claude(data, record):
                 inputs = part.get('input')
                 inputs = inputs if isinstance(inputs, dict) else {}
                 data['current_action'] = current_action(part.get('name', ''), inputs.get('file_path') or inputs.get('command'), part.get('server_name', ''))
+                if part.get('name') == 'Bash':
+                    launch = codex_launch(inputs.get('command'), data.get('cwd', ''), at)
+                    if launch:
+                        launch['tool_id'] = part.get('id')
+                        data.setdefault('_codex_launches', []).append(launch)
+                        del data['_codex_launches'][:-256]
+            elif isinstance(part, dict) and part.get('type') == 'tool_result':
+                tool_id = part.get('tool_use_id')
+                launch = next((item for item in reversed(data.get('_codex_launches', []))
+                               if tool_id and item.get('tool_id') == tool_id), None)
+                if launch:
+                    launch['thread'] = recorded_thread(part.get('content')) or launch['thread']
     tool_result = isinstance(content, list) and any(isinstance(p, dict) and p.get('type') == 'tool_result' for p in content)
     if kind == 'user' and not tool_result:
         if at is not None and not record.get('isMeta'):
             data['turn_started'] = at
+            start_turn(data, at)
         texts = [content] if isinstance(content, str) else [p.get('text', '') for p in content or [] if isinstance(p, dict) and p.get('type') == 'text']
         first_line = next((line.strip() for text in texts if isinstance(text, str) for line in text.splitlines() if line.strip()), '')
         if first_line:
             data.setdefault('first_user', first_line)
     data['last_turn'] = message.get('stop_reason') if kind == 'assistant' else 'user'
+    record_activity(data, at)
     if kind == 'assistant' and message.get('stop_reason') == 'end_turn' and at is not None:
         data['waiting_since'] = at
+        end_turn(data, at)
     if kind == 'assistant':
         model = message.get('model')
         if isinstance(model, str) and not model.startswith('<'):
@@ -155,3 +236,8 @@ def consume_claude(data, record):
             values = [usage.get(k, 0) for k in ('input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens')]
             if 'input_tokens' in usage and all(isinstance(v, int) and v >= 0 for v in values):
                 data['context_tokens'] = sum(values)
+
+
+def consume_claude_sidechain(data, record):
+    """Read a subagent transcript under its owning Claude session."""
+    consume_claude(data, {**record, 'isSidechain': False})

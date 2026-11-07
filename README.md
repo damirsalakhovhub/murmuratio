@@ -1,35 +1,86 @@
-# murmuratio
+# Murmuratio
 
-Murmuratio is a local board for Claude Code and Codex on your Mac. When Claude starts Codex workers in hidden chats, the board shows them under their orchestrator, grouped by project, with their tasks, models, status, context use and usage limits.
+Beta software, provided "as is" without warranty of any kind. Use at your own risk. You are responsible for your data, your agents and their actions. See [LICENSE](LICENSE).
 
-Requires macOS and Python 3.11 or newer.
+A local board for Claude Code and Codex on macOS. See orchestrators and their workers grouped by project, with their tasks, models, inferred status, context and usage limits.
+
+![Murmuratio board with sample data: two projects, each with an orchestrator and its workers, one worker blocked waiting for approval, and Claude and Codex usage limits in the header](docs/screenshot.png)
+
+## Install
+
+Requires macOS and Python 3.11 or newer. The application uses only the Python standard library.
 
 ```sh
-git clone https://github.com/damirsalakhovhub/murmuratio.git
-cd murmuratio
-./murmuratio install                  # add --launch-agent to start at login
-./murmuratio run              # open http://127.0.0.1:8765/
-./murmuratio uninstall
+git clone https://github.com/damirsalakhovhub/murmuratio.git && cd murmuratio
+./murmuratio install   # --dry-run to preview, --launch-agent to start at login
+./murmuratio run       # http://127.0.0.1:8765/
 ```
 
-The installer wraps the Claude Code `statusLine` in `~/.claude/settings.json`, preserving its previous command and backing up the original settings. It creates `~/.config/murmuratio/config.toml` and `~/.local/share/murmuratio/`. Uninstall restores the previous status line, preserves unrelated settings changes, and removes both the current and old `agent-inspector` configuration and data directories. Keep the cloned folder while installed. Use `./murmuratio install --dry-run` to inspect the changes first.
+Try it without installing: `./murmuratio run --demo` shows sample data. `./murmuratio doctor` checks local sources.
 
-On install or run, old `agent-inspector` configuration and data directories move to the new names if the corresponding destination does not exist. Existing destinations are never overwritten. The old `./agent-inspector` command remains as a deprecated alias for one release.
+Keep the cloned folder while installed. If `~/.claude` exists, the installer backs up Claude Code settings and wraps the existing status line; otherwise it skips that step. Run install again after adding Claude to enable it.
 
-Murmuratio reads local Claude and Codex files, serves only on `127.0.0.1`, and sends nothing. An existing status line is a separate command and may do its own work.
+## What it reads, writes and sends
+
+Reads by default:
+
+- Claude Code transcripts and subagent records: `~/.claude/projects/`. Claude desktop session metadata: `~/Library/Application Support/Claude/claude-code-sessions/`.
+- Saved Codex sessions and usage-limit events: `~/.codex/sessions/`. Interactive and `exec` sessions appear without a wrapper or optional module. `CODEX_HOME` selects the Codex data directory.
+- Local open-file information from macOS `lsof`, to check whether an inactive Codex rollout still has a writer.
+- Claude limits caches: `~/.local/share/murmuratio/claude-limits.json` and legacy `~/.claude/tools/claude-limits.json`. The newest usable snapshot is selected.
+- With `codex_wrapper`: compatible run records in `~/.claude/tools/codex-runs/` and the event files they reference. Murmuratio does not create wrapper records.
+- With `codex_chats`: `~/.codex/state_5.sqlite` and its WAL/SHM files, `~/.codex/.codex-global-state.json`, and referenced rollouts under `sessions/` or `archived_sessions/` in the Codex data directory.
+
+Writes:
+
+- Configuration: `~/.config/murmuratio/config.toml`, created by install only if absent.
+- Installation records and settings backups: `~/.local/share/murmuratio/install/`.
+- When `~/.claude` exists: `~/.claude/settings.json`, to wrap `statusLine` while preserving the previous command. The wrapper writes the Claude limits cache above.
+- With `--launch-agent`: `~/Library/LaunchAgents/org.murmuratio.app.plist`.
+- Optional forecast and routing read and write `~/.claude/tools/limits-history.jsonl`; routing also writes `~/.claude/tools/routing.json`. These paths and the wrapper directory are configurable.
+- Optional context reset also reads `goals_1.sqlite` and `config.toml` in the Codex data directory, keeps recovery state at `~/.local/share/murmuratio/reset/reset-results.json`, and can change Codex data.
+- Browser preferences stay in local browser storage.
+
+`./murmuratio run --dry-run` lists the active paths.
+
+Sends: nothing during normal use. The HTTP server listens only on `127.0.0.1` and makes no model or account API calls. The previous status-line command and an explicitly confirmed experimental context reset can run software with its own network activity. See [SECURITY.md](SECURITY.md).
+
+## Accuracy limits
+
+- Codex discovery covers saved sessions modified in the last 24 hours. Ephemeral sessions without saved rollouts are invisible.
+- Claude-to-Codex parent links use recorded identifiers when available. Otherwise, a unique working-directory and launch-time match within about two minutes is marked inferred and may be wrong. Indirect or delayed launches may be missed.
+- Very large records may be read partially or skipped. Codex board reads skip most individual records larger than 512 KiB; oversized metadata and turn boundaries receive limited handling.
+- Status and context are inferred from saved data. Usage-limit numbers are snapshots and may be stale.
+- A completed wrapper record wins over unfinished rollout state. Codex threads with no rollout writer and no activity for over 30 minutes move to completed as crashed; a live wrapper process keeps its current status. If the process check fails, the board preserves the inferred status.
+- Only macOS is supported.
 
 ## Optional modules
 
-All modules are off by default. Set any to `true` under `[modules]` in the config file and restart the board:
+All modules are off by default. Set them to `true` under `[modules]` in `~/.config/murmuratio/config.toml`, then restart:
 
-- `forecast`: estimates when usage limits will be reached.
-- `scenarios`: compares usage scenarios; requires `forecast`.
-- `routing`: suggests which tool to use based on available limits.
-- `codex_credits`: shows Codex credit usage.
-- `burn_rate`: shows token usage rates.
-- `codex_chats`: opens saved Codex chats.
-- `context_reset`: enables experimental Codex context reset; requires `codex_chats` and launches Codex, whose own network activity is outside Murmuratio's control.
-- `codex_wrapper`: reads local Codex wrapper records.
-- `branding`: shows additional board graphics.
+- `forecast`: estimates usage limits; `scenarios` compares forecasts and requires `forecast`.
+- `routing`: suggests a tool; `codex_credits` shows credit usage; `burn_rate` shows token usage rates.
+- `codex_chats`: shows saved chats; `context_reset` enables experimental resets and requires `codex_chats`.
+- `codex_wrapper`: reads wrapper records; `branding` adds board graphics.
 
-For a board with sample data, run `./murmuratio run --demo`. Demo reads no personal session data; the first run can still migrate old Murmuratio directories. License: [MIT](LICENSE).
+## Uninstall
+
+```sh
+./murmuratio uninstall
+```
+
+This restores the previous status line and removes files the installer owns. Existing or edited configuration and other data are kept. Older installations without file ownership records may leave their configuration or backup in place.
+
+## Disclaimer
+
+Murmuratio is not affiliated with or endorsed by Anthropic or OpenAI. Claude, Claude Code and Codex are trademarks of their respective owners.
+
+Normal inspection uses only local data and sends no data off your machine. Existing status-line commands and the optional context reset can run software with its own network activity, as described above. To the extent permitted by applicable law, the authors are not liable for any loss, damage, cost (including API or subscription usage), data exposure or downtime arising from use of Murmuratio. Usage-limit and context numbers are estimates and must not be relied on for billing or decisions.
+
+## More
+
+- [CHANGELOG.md](CHANGELOG.md)
+- [SECURITY.md](SECURITY.md)
+- [CONTRIBUTING.md](CONTRIBUTING.md) and [tests/README.md](tests/README.md) for development checks
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- [MIT license](LICENSE)

@@ -78,8 +78,12 @@ class CodexLimitsAdapter(Adapter):
         if not self.root.is_dir():
             raise UnavailableSource()
         files = []
+        root = self.root.resolve()
         for path in self.root.glob('*/*/*/rollout-*.jsonl'):
             try:
+                if not path.resolve().is_relative_to(root):
+                    self.unsupported()
+                    continue
                 files.append((path.stat().st_mtime, path))
             except OSError:
                 self.unavailable()

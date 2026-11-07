@@ -3,7 +3,6 @@ import argparse
 from datetime import datetime
 import math
 import os
-from pathlib import Path
 
 
 class PlainArgumentParser(argparse.ArgumentParser):

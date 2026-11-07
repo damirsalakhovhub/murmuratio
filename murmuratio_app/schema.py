@@ -16,6 +16,7 @@ class Parent(TypedDict, total=False):
     parent_session: str
     parent_app_session: str
     orchestrator: bool
+    link: Literal['exact', 'inferred']
 
 
 class Action(TypedDict, total=False):

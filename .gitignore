@@ -1,5 +1,15 @@
+# Local data and browser-test screenshots
 .inspector-data/
+
+# Python caches and virtual environments
 __pycache__/
 *.pyc
-.DS_Store
+.venv/
+.coverage
+
+# Local development tools and browser-test dependencies
+.claude/
 node_modules/
+
+# macOS metadata
+.DS_Store

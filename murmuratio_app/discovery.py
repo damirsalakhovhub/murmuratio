@@ -1,5 +1,6 @@
 """Discover local source locations without opening or modifying their data."""
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from shutil import which
 
@@ -17,9 +18,9 @@ class Discovery:
     claude_limits_legacy: Path
 
     @classmethod
-    def at(cls, home, config):
+    def at(cls, home, config, codex_home=None):
         home = Path(home)
-        codex = home / '.codex'
+        codex = Path(codex_home or os.environ.get('CODEX_HOME') or home / '.codex').expanduser()
         return cls(
             claude_executable=which('claude'), codex_executable=which('codex'),
             claude_sessions=home / '.claude/projects',

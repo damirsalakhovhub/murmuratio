@@ -1,0 +1,181 @@
+{
+  "agents": [
+    {
+      "id": "codex:run-1",
+      "kind": "codex",
+      "who": "Codex sol",
+      "model": "gpt-6.1-sol",
+      "thread": null,
+      "cwd": "/work/example",
+      "folder": "example",
+      "project": "example",
+      "task": "Example task",
+      "status": "working",
+      "last_action": "",
+      "last_at": 1999900.0,
+      "current_action": "",
+      "started": 1999900.0,
+      "parent_session": "",
+      "parent_app_session": "",
+      "from_cwd": "",
+      "seconds": 0,
+      "context_tokens": null,
+      "completed": false,
+      "context_used": null,
+      "context_window": null,
+      "ended": null,
+      "verdict": "",
+      "head": "",
+      "parent_id": null,
+      "orchestrator": false
+    },
+    {
+      "id": "claude:session-1",
+      "kind": "claude",
+      "who": "Claude Opus 5.5",
+      "model": "claude-opus-5-5",
+      "cwd": "/work/example",
+      "folder": "example",
+      "project": "example",
+      "task": "Example task",
+      "title_source": "desktop",
+      "status": "done",
+      "last_action": "Completed",
+      "current_action": "",
+      "started": 1999900.0,
+      "turn_started": 1999900.0,
+      "ended": 1999950.0,
+      "waiting_since": 1999950.0,
+      "app_session": "local_1",
+      "parent_session": "parent-1",
+      "last_at": 1999950.0,
+      "seconds": 50.0,
+      "context_tokens": 20,
+      "context_used": 20,
+      "context_window": 1000000,
+      "parent_id": null,
+      "orchestrator": false
+    }
+  ],
+  "completed": [],
+  "now": 2000000,
+  "limits": {
+    "codex": [
+      {
+        "window_minutes": 10080,
+        "used_percent": 25,
+        "resets_at": 2600000.0
+      }
+    ],
+    "claude": [
+      {
+        "window_minutes": 300,
+        "used_percent": 12,
+        "resets_at": 2003600.0
+      },
+      {
+        "window_minutes": 10080,
+        "used_percent": 30,
+        "resets_at": 2600000.0
+      }
+    ]
+  },
+  "build": "fixture-build",
+  "routing": {
+    "at": 2000000,
+    "leader": "default",
+    "code_to": "codex",
+    "design_to": "claude",
+    "tiers": {
+      "codex": {
+        "simple": "luna",
+        "hard": "sol"
+      },
+      "claude": {
+        "simple": "Sonnet",
+        "hard": "Opus"
+      }
+    },
+    "claude": {
+      "used_percent": 30,
+      "remaining": 70,
+      "resets_at": 2600000.0,
+      "days_left": 6.944444444444445,
+      "allowance_per_day": 10.08,
+      "burn_per_day": 0,
+      "headroom": 10.08
+    },
+    "codex": {
+      "used_percent": 25,
+      "remaining": 75,
+      "resets_at": 2600000.0,
+      "days_left": 6.944444444444445,
+      "allowance_per_day": 10.799999999999999,
+      "burn_per_day": 0,
+      "headroom": 10.799999999999999
+    },
+    "reason": "Both tools have sufficient headroom, so Codex leads code and Claude leads design."
+  },
+  "forecast": {
+    "claude": {
+      "start": 1995200.0,
+      "resets_at": 2600000.0,
+      "used_percent": 30,
+      "points": [
+        [
+          2000000,
+          30
+        ]
+      ],
+      "pace_per_day": null,
+      "projected_at_reset": null,
+      "hits_100_at": null,
+      "worker_share": 1.0
+    },
+    "codex": {
+      "start": 1995200.0,
+      "resets_at": 2600000.0,
+      "used_percent": 25,
+      "points": [
+        [
+          2000000,
+          25
+        ]
+      ],
+      "pace_per_day": null,
+      "projected_at_reset": null,
+      "hits_100_at": null,
+      "credits": {
+        "balance": 80.0,
+        "at": 1999900.0,
+        "per_hour": null,
+        "sample_credits": 0.0,
+        "sample_hours": 0.0
+      }
+    }
+  },
+  "burn": {
+    "claude": {
+      "start": 1995200.0,
+      "hours": [
+        [
+          1998000,
+          {
+            "claude-opus-5-5": 30.0
+          }
+        ]
+      ]
+    },
+    "codex": {
+      "start": 1995200.0,
+      "hours": []
+    }
+  },
+  "credits": {
+    "balance": 80.0,
+    "at": 1999900.0,
+    "per_hour": null,
+    "sample_credits": 0.0,
+    "sample_hours": 0.0
+  }
+}

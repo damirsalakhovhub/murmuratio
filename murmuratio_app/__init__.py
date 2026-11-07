@@ -1,1 +1,3 @@
-"""Local source adapters and normalized metrics."""
+"""Local board for Claude Code and Codex."""
+
+__version__ = '0.1.0-beta'

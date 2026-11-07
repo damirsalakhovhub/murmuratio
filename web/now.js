@@ -4,6 +4,8 @@ window.createNowView = ({node, text}) => {
   const summary = document.getElementById('now-summary');
   const limitsEl = document.getElementById('now-limits');
   const error = document.getElementById('now-error');
+  const empty = node('p', 'now-empty', 'Murmuratio reads local Claude Code and Codex sessions. None were found.');
+  empty.hidden = true; board.append(empty);
   const groups = new Map(), cards = new Map();
   // An approval request needs the owner even when it comes from a worker.
   const needsYou = agent => !agent.completed && agent.status === 'blocked' && (agent.orchestrator || agent.current_action === 'waiting for approval');
@@ -11,7 +13,7 @@ window.createNowView = ({node, text}) => {
   const svgNS = 'http://www.w3.org/2000/svg';
   let queued = null, overBoard = false, loadedBuild = '';
   const clock = at => Number.isFinite(at) ? new Date(at * 1000).toLocaleTimeString('en-GB', {hour: '2-digit', minute: '2-digit'}) : '—';
-  const minutes = seconds => `${Math.floor(Math.max(0, seconds || 0) / 60)} min`;
+  const minutes = seconds => `${Math.floor(Math.max(0, seconds || 0) / 60)}′`;
   const sameDay = (a, b) => Number.isFinite(a) && new Date(a * 1000).toDateString() === new Date(b * 1000).toDateString();
   // One format everywhere: when it started and how long it has worked.
   function timeLine(agent, now) {
@@ -19,12 +21,7 @@ window.createNowView = ({node, text}) => {
       return agent.status === 'working' ? [clock(agent.turn_started), minutes(now - agent.turn_started)]
         : [`Last reply ${clock(agent.waiting_since ?? agent.last_at)}`];
     }
-    const finished = agent.completed || ['done', 'crashed'].includes(agent.status);
-    const stop = finished ? (agent.ended ?? agent.last_at) : ['waiting', 'idle', 'blocked'].includes(agent.status)
-      ? (agent.waiting_since ?? agent.last_at) : now;
-    const worked = finished && Number.isFinite(agent.seconds) ? agent.seconds
-      : Number.isFinite(agent.started) && Number.isFinite(stop) ? stop - agent.started : agent.seconds;
-    return [clock(agent.started), minutes(worked)];
+    return [clock(agent.started), minutes(agent.seconds)];
   }
   function modelLabel(agent) {
     if (agent.kind === 'claude') return (agent.who || 'Claude').replace(/^Claude\s*/, '') || 'Claude';
@@ -33,7 +30,7 @@ window.createNowView = ({node, text}) => {
   function statusText(agent) {
     switch (agent.status) {
       case 'working': return ['Running', agent.current_action];
-      case 'waiting': return [agent.orchestrator ? 'Quiet' : 'Turn finished'];
+      case 'waiting': return ['Turn finished'];
       case 'idle': return ['Idle', 'agents working'];
       case 'done': return ['Done'];
       case 'blocked': return ['Blocked', agent.current_action];
@@ -118,18 +115,21 @@ window.createNowView = ({node, text}) => {
     tipEl.replaceChildren(...parts); tipEl.hidden = false;
   }
   function hideTip() { clearTimeout(tipTimer); if (!tipEl.hidden) tipWarmUntil = performance.now() + 300; tipEl.hidden = true; tipTarget = null; }
-  limitsEl.addEventListener('pointerover', event => {
-    const el = event.target.closest?.('[data-tip]');
-    if (!el || el === tipTarget) return;
-    clearTimeout(tipTimer);
-    if (!tipEl.hidden || performance.now() < tipWarmUntil) showTip(el);
-    else tipTimer = setTimeout(() => showTip(el), 500);
-  });
-  limitsEl.addEventListener('pointerout', event => {
-    const next = event.relatedTarget?.closest?.('[data-tip]');
-    if (next && limitsEl.contains(next)) return;
-    hideTip();
-  });
+  // Limits and board cards share one tooltip; whatever a narrow card hides comes back here.
+  for (const area of [limitsEl, board]) {
+    area.addEventListener('pointerover', event => {
+      const el = event.target.closest?.('[data-tip]');
+      if (!el || el === tipTarget) return;
+      clearTimeout(tipTimer);
+      if (!tipEl.hidden || performance.now() < tipWarmUntil) showTip(el);
+      else tipTimer = setTimeout(() => showTip(el), 500);
+    });
+    area.addEventListener('pointerout', event => {
+      const next = event.relatedTarget?.closest?.('[data-tip]');
+      if (next && area.contains(next)) return;
+      hideTip();
+    });
+  }
   addEventListener('scroll', hideTip, {passive: true});
   function renderLimits(data) {
     const activeKey = tipTarget?.dataset.tipKey;
@@ -589,7 +589,8 @@ window.createNowView = ({node, text}) => {
     const byId = new Map(agents.map(agent => [agent.id, agent]));
     const finished = agent => agent.completed || ['done', 'crashed'].includes(agent.status)
       || (!agent.orchestrator && agent.status === 'blocked' && !needsYou(agent));
-    const keep = new Set(agents.filter(agent => !finished(agent) || now - (agent.ended ?? agent.last_at ?? 0) < 1800).map(agent => agent.id));
+    const keep = new Set(agents.filter(agent => agent.board_source === 'codex_rollout' || !finished(agent)
+      || now - (agent.ended ?? agent.last_at ?? 0) < 1800).map(agent => agent.id));
     const pending = [...keep];
     while (pending.length) {
       const parent = byId.get(pending.pop()).parent_id;
@@ -654,19 +655,27 @@ window.createNowView = ({node, text}) => {
     ring.append(circle('now-context-track'), fill); context.append(ring, percent);
     footer.append(status, time, context); details.append(footer);
     el.append(top, task, details); group.items.append(el);
-    const view = {el, who, model, task, action, time, context, percent, fill, group, depth: 0, agent};
+    const view = {el, who, model, task, status, action, time, context, percent, fill, group, depth: 0, agent};
     cards.set(agent.id, view); group.cards.push(view);
     return view;
   }
   function paintCard(view, agent, now) {
     view.agent = agent;
+    if (agent.link === 'inferred') view.el.title = 'Parent link inferred from working directory and launch time';
+    else if (agent.link === 'exact') view.el.title = 'Parent link recorded in session data';
+    else view.el.removeAttribute('title');
     text(view.who, agent.orchestrator ? 'Orchestrator' : agent.folder);
     text(view.model, modelLabel(agent)); text(view.task, agent.task);
     if (modules.codex_chats && agent.kind === 'codex' && agent.thread) view.task.href = '/?codex=' + encodeURIComponent(agent.thread);
     else view.task.removeAttribute('href');
     const [word, detail] = statusText(agent);
     view.action.replaceChildren(node('span', 'now-word', word), ...(detail ? [node('span', 'now-current', detail)] : []));
-    view.time.replaceChildren(...timeLine(agent, now).map(value => node('span', '', value)));
+    tip(view.status, {title: word || 'Status', note: detail});
+    const times = timeLine(agent, now);
+    view.time.replaceChildren(...times.map(value => node('span', '', value)));
+    tip(view.time, times.length > 1
+      ? {title: agent.status === 'working' ? 'Working' : 'Worked', rows: [['Started', times[0]], ['Duration', times[1]]]}
+      : {title: times[0]});
     const known = Number.isFinite(agent.context_used) && agent.context_used >= 0
       && Number.isFinite(agent.context_window) && agent.context_window > 0;
     view.context.hidden = !known;
@@ -676,6 +685,9 @@ window.createNowView = ({node, text}) => {
       view.context.setAttribute('aria-label', `Context window ${Math.round(pct)}% used`);
       view.context.dataset.level = pct >= 80 ? 'high' : pct >= 50 ? 'mid' : 'low';
       view.fill.setAttribute('stroke-dasharray', `${pct} 100`);
+      const tokens = n => n >= 1e6 ? +(n / 1e6).toFixed(1) + 'M' : n >= 1000 ? Math.round(n / 1000) + 'k' : String(Math.round(n));
+      tip(view.context, {title: 'Context window', rows: [['Used', Math.round(pct) + '%'],
+        ['Tokens', `${tokens(agent.context_used)} of ${tokens(agent.context_window)}`]]});
     }
     view.el.classList.toggle('need', needsYou(agent));
     view.el.classList.toggle('run', agent.status === 'working');
@@ -693,12 +705,16 @@ window.createNowView = ({node, text}) => {
         children.get(parent).push(view);
       }
       for (const [parent, kids] of children) {
-        const pb = parent.el.getBoundingClientRect(), x = pb.left - bounds.left + 18;
-        const end = kids.at(-1).el.getBoundingClientRect().top - bounds.top + 20;
-        let d = `M ${x} ${pb.bottom - bounds.top} V ${end - 8}`;
-        for (const kid of kids) {
-          const kb = kid.el.getBoundingClientRect(), y = kb.top - bounds.top + 20;
-          d += ` M ${x} ${y - 8} Q ${x} ${y} ${x + 8} ${y} H ${kb.left - bounds.left}`;
+        // Segments only touch end to end: overlapping strokes would double the line's brightness at joins.
+        const pb = parent.el.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+        const x = Math.round((pb.left - bounds.left + 9) * dpr) / dpr;
+        // Inner branches leave the trunk straight; only the last one bends.
+        const at = kid => { const kb = kid.el.getBoundingClientRect(); return [kb.top - bounds.top + 20, kb.left - bounds.left]; };
+        const [lastY, lastLeft] = at(kids.at(-1));
+        let d = `M ${x} ${pb.bottom - bounds.top} V ${lastY - 8} Q ${x} ${lastY} ${x + 8} ${lastY} H ${lastLeft}`;
+        for (const kid of kids.slice(0, -1)) {
+          const [y, left] = at(kid);
+          d += ` M ${x + 0.75} ${y} H ${left}`;
         }
         const path = document.createElementNS(svgNS, 'path'); path.setAttribute('d', d); paths.push(path);
       }
@@ -715,8 +731,9 @@ window.createNowView = ({node, text}) => {
       loadedBuild = data.build;
     }
     // Existing cards keep their order; newly seen cards append after their parent.
-    // Finished work leaves the board 30 min after it ends; the column header keeps the day's count.
+    // Saved Codex sessions remain for the recent history window; other finished work leaves after 30 min.
     const everyone = [...(data.agents || []), ...(data.completed || [])];
+    empty.hidden = everyone.length > 0;
     const incoming = retainedCards(everyone, data.now);
     // A same-title successor takes its predecessor's place, above existing workers.
     for (const agent of incoming.values()) {
@@ -774,7 +791,7 @@ window.createNowView = ({node, text}) => {
           && (parentView.el.compareDocumentPosition(view.el) & Node.DOCUMENT_POSITION_PRECEDING)) parentView.el.after(view.el);
       view.depth = finished ? 0 : parent && cards.get(parent.id).group === group ? Math.min(cards.get(parent.id).depth + 1, 2) : 0;
       view.el.dataset.parentId = agent.parent_id || '';
-      view.el.style.marginInlineStart = view.depth ? `${view.depth * 30}px` : '';
+      view.el.style.marginInlineStart = view.depth ? `${view.depth * 21}px` : '';
       paintCard(view, agent, data.now);
     }
     for (const agent of incoming.values()) place(agent);
@@ -789,14 +806,14 @@ window.createNowView = ({node, text}) => {
     const total = counts(everyone);
     burnData = modules.burn_rate ? data.burn || {} : {}; renderLimits(data); renderForecast(data.forecast, data.now, workShare(everyone, data.now));
     summary.replaceChildren();
-    for (const [value, label] of [[total.running, ' running'], [total.needs, ' needs you'], [total.done, ' done today']]) {
+    for (const [value, label] of [[total.running, ' running'], [total.needs, ' needs attention'], [total.done, ' done today']]) {
       const item = node('span', 'now-summary-item');
       item.append(node('b', '', String(value)), label); summary.append(item);
     }
     for (const [project, group] of groups) {
       const c = counts(everyone.filter(a => a.project === project));
       group.el.classList.toggle('quiet', !c.running);
-      group.counts.replaceChildren(...[c.needs ? `${c.needs} needs you` : '', c.running ? `${c.running} running` : '',
+      group.counts.replaceChildren(...[c.needs ? `${c.needs} needs attention` : '', c.running ? `${c.running} running` : '',
         c.done ? `${c.done} done` : ''].filter(Boolean).map(value => node('span', '', value)));
     }
     error.hidden = true; drawTrees();

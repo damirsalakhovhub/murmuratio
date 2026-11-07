@@ -1,8 +1,0 @@
-#!/usr/bin/env python3
-"""Deprecated entry point retained for one release."""
-import os
-from pathlib import Path
-import sys
-
-print('agent-inspector is deprecated; use murmuratio.', file=sys.stderr, flush=True)
-os.execv(sys.executable, [sys.executable, '-B', str(Path(__file__).with_name('murmuratio')), *sys.argv[1:]])
