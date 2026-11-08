@@ -1,6 +1,11 @@
 """Adapters for Claude's cached limits and Codex rollout limits."""
 import json
+import math
+import os
 from pathlib import Path
+import select
+import subprocess
+import tempfile
 import time
 from murmuratio_app.adapters.base import Adapter, AbsentSource, UnavailableSource, UnsupportedSource
 from murmuratio_app.adapters.limits import limit_window, rollout_limits
@@ -85,6 +90,7 @@ class CodexLimitsAdapter(Adapter):
         self.clock = clock
         self.age_seconds = None
         self.stale = False
+        self.live = None  # (at, windows) from app_server_limits, when enabled
 
     def collect(self):
         self.age_seconds = None
@@ -136,14 +142,7 @@ class CodexLimitsAdapter(Adapter):
                 windows = rollout_limits(data)
                 if windows:
                     at = timestamp(data.get('timestamp')) if isinstance(data, dict) else None
-                    now = self.clock()
-                    self.age_seconds = max(0, now - at) if at is not None else None
-                    self.stale = (self.age_seconds is None or self.age_seconds > CLAUDE_LIMITS_STALE_SECONDS
-                                  or any(window['resets_at'] is not None and window['resets_at'] <= now for window in windows))
-                    if self.stale and self.status == 'available':
-                        self.status = 'stale'
-                    for window in windows:
-                        yield self.observation(window, at)
+                    yield from self.emit(at, windows)
                     return
                 stack = [data]
                 while stack:
@@ -154,3 +153,101 @@ class CodexLimitsAdapter(Adapter):
                         stack.extend(item.values())
                     elif isinstance(item, list):
                         stack.extend(item)
+        if self.live:
+            yield from self.emit(*self.live)
+
+    def emit(self, at, windows):
+        """Yield the newest sample: the rollout's, or a newer live read from Codex itself."""
+        if self.live and (at is None or self.live[0] > at):
+            at, windows = self.live
+        now = self.clock()
+        self.age_seconds = max(0, now - at) if at is not None else None
+        self.stale = (self.age_seconds is None or self.age_seconds > CLAUDE_LIMITS_STALE_SECONDS
+                      or any(window['resets_at'] is not None and window['resets_at'] <= now for window in windows))
+        if self.stale and self.status == 'available':
+            self.status = 'stale'
+        for window in windows:
+            yield self.observation(window, at)
+
+
+def app_server_limits(command, timeout=15, clock=time.time):
+    """Read the account's current Codex limits the way the Codex app does.
+
+    Starts `codex app-server` and sends one `account/rateLimits/read` request: a read of the
+    usage status, with no model call and no write. Returns (at, windows, credits balance or None)."""
+    if os.sep in command:
+        command = os.path.abspath(command)  # the server runs in a temporary directory
+    try:
+        process = subprocess.Popen([command, 'app-server'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, cwd=tempfile.gettempdir())
+    except OSError:
+        raise UnavailableSource() from None
+    deadline, sent = time.monotonic() + timeout, False
+    try:
+        def send(message):
+            process.stdin.write(json.dumps(message).encode() + b'\n')
+            process.stdin.flush()
+        send({'id': 1, 'method': 'initialize', 'params': {'clientInfo': {'name': 'murmuratio', 'version': '1'}}})
+        def messages():
+            # Raw reads: a buffered readline can hide a second line from select.
+            pending = b''
+            while time.monotonic() < deadline:
+                ready, _, _ = select.select([process.stdout], [], [], max(0, deadline - time.monotonic()))
+                if not ready:
+                    return
+                chunk = os.read(process.stdout.fileno(), 65536)
+                if not chunk:
+                    return
+                pending += chunk
+                if len(pending) > 4 * 1024 * 1024:
+                    return
+                *lines, pending = pending.split(b'\n')
+                for line in lines:
+                    try:
+                        yield json.loads(line)
+                    except ValueError:
+                        continue
+        for message in messages():
+            if not isinstance(message, dict):
+                continue
+            if message.get('id') in (1, 2) and 'error' in message:
+                break  # for example not signed in
+            if message.get('id') == 1 and not sent:
+                send({'method': 'initialized'})
+                send({'id': 2, 'method': 'account/rateLimits/read', 'params': None})
+                sent = True
+            elif message.get('id') == 2:
+                result = message.get('result')
+                limits = result.get('rateLimits') if isinstance(result, dict) else None
+                if not isinstance(limits, dict):
+                    raise UnsupportedSource()
+                windows = []
+                for key in ('primary', 'secondary'):
+                    item = limits.get(key)
+                    if isinstance(item, dict):
+                        window = limit_window(dict(used_percent=item.get('usedPercent'),
+                                                   window_minutes=item.get('windowDurationMins'),
+                                                   resets_at=item.get('resetsAt')))
+                        if window:
+                            windows.append(window)
+                if not windows:
+                    raise UnsupportedSource()
+                credits = limits.get('credits')
+                try:
+                    balance = float(credits.get('balance')) if isinstance(credits, dict) else None
+                except (TypeError, ValueError):
+                    balance = None
+                return clock(), windows, balance if balance is not None and math.isfinite(balance) else None
+        raise UnavailableSource()
+    except (OSError, ValueError):
+        raise UnavailableSource() from None
+    finally:
+        try:
+            process.stdin.close()
+        except OSError:
+            pass
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()

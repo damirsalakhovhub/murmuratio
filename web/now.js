@@ -87,6 +87,12 @@ window.createNowView = ({node, text}) => {
     if (codeLeader) icon.setAttribute('aria-label', (kind === 'claude' ? 'Claude' : 'Codex') + ' gets the code today');
     return icon;
   }
+  // Age of a last known sample: 36m, 5h, 2d.
+  function ageText(seconds) {
+    if (!Number.isFinite(seconds)) return '';
+    const m = Math.max(1, Math.round(seconds / 60));
+    return m < 60 ? `${m}m` : m < 48 * 60 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`;
+  }
   function paceMark(window, stats) {
     if (window.window_minutes !== 10080 || !Number.isFinite(stats?.allowance_per_day)
         || !Number.isFinite(stats?.burn_per_day) || stats.burn_per_day <= 0) return null;
@@ -144,13 +150,19 @@ window.createNowView = ({node, text}) => {
       for (const [index, window] of windows.entries()) {
         const state = limitState(window, data.now), item = node('span', 'now-gauge');
         item.dataset.tool = kind; item.dataset.level = state.level;
-        const stale = data.sources?.[kind + '_limits']?.status === 'stale' || data.sources?.[kind + '_limits']?.stale === true;
-        item.setAttribute('aria-label', `${kind === 'claude' ? 'Claude' : 'Codex'} ${window.window_minutes >= 10080 ? 'week' : '5h'} ${state.percent}% used${stale ? ', stale' : ''}`);
+        const source = data.sources?.[kind + '_limits'];
+        const stale = source?.status === 'stale' || source?.stale === true, old = stale ? ageText(source.age_seconds) : '';
+        // A stale sample stays as the last known value with its age; only an unknown age says "stale".
+        const staleText = stale ? (old ? `, ${old} old` : ' stale') : '';
+        item.setAttribute('aria-label', `${kind === 'claude' ? 'Claude' : 'Codex'} ${window.window_minutes >= 10080 ? 'week' : '5h'} ${state.percent}% used${stale ? (old ? `, last known ${old} ago` : ', stale') : ''}`);
         const label = node('span', 'now-gauge-label');
         const name = kind === 'claude' ? 'Claude' : 'Codex', week = window.window_minutes >= 10080;
         const span = week ? 'week' : Math.round(window.window_minutes / 60) + '-hour';
-        const win = node('span', 'now-gauge-win', (week ? 'week' : Math.round(window.window_minutes / 60) + 'h') + (stale ? ' stale' : ''));
-        tip(win, {title: `${name} ${span} window`, note: week ? 'Usage counts over a rolling week' : `Usage counts over a rolling ${span.replace('-hour', ' hours')}`});
+        const win = node('span', 'now-gauge-win', (week ? 'week' : Math.round(window.window_minutes / 60) + 'h') + staleText);
+        if (stale) win.dataset.stale = 'true';
+        tip(win, stale ? {title: `${name} ${span} window, last known value`, note: old
+          ? `Sampled ${old} ago. ${name} reports limits only while it works.` : 'The sample age is unknown.'}
+          : {title: `${name} ${span} window`, note: week ? 'Usage counts over a rolling week' : `Usage counts over a rolling ${span.replace('-hour', ' hours')}`});
         const resetLine = node('span', 'now-gauge-reset'), reset = node('span', '', state.reset);
         if (Number.isFinite(window.resets_at)) tip(reset, {title: `${name} ${span} reset`, rows: [['In', state.reset],
           ['At', new Date(window.resets_at * 1000).toLocaleString('en-GB', {weekday: week ? 'short' : undefined, hour: '2-digit', minute: '2-digit'})]]});
@@ -177,11 +189,23 @@ window.createNowView = ({node, text}) => {
     }
     const credit = modules.codex_credits ? data.credits : null;
     if (credit && Number.isFinite(credit.balance)) {
-      const item = node('span', 'now-credits'), value = node('span', 'now-credits-value',
-        credit.balance >= 1000 ? (credit.balance / 1000).toFixed(1) + 'k' : String(Math.round(credit.balance)));
-      item.append(value, node('span', 'now-credits-label', 'credits'));
-      tip(item, {title: 'Codex credits', note: 'Spent only after the weekly limit hits 100%',
-        rows: [['Balance', Math.round(credit.balance).toLocaleString('en-US')],
+      const short = v => v >= 1000 ? (v / 1000).toFixed(1) + 'k' : String(Math.round(v));
+      // With routing, the balance is split by month. Credits are spent only once the Codex week
+      // is at 100%; only then does the label add this week's share left.
+      const month = Number.isFinite(credit.month_left), item = node('span', 'now-credits');
+      const monthName = month && new Date((credit.month_ends_at - 1) * 1000).toLocaleDateString('en-GB', {month: 'long'});
+      const codexWeek = (data.limits?.codex || []).find(w => w.window_minutes >= 10080);
+      const spending = month && codexWeek?.used_percent >= 100 && Number.isFinite(credit.week_share_left);
+      const value = node('span', 'now-credits-value', short(month ? credit.month_left : credit.balance));
+      item.append(value, node('span', 'now-credits-label', month
+        ? `credits left in ${monthName}` + (spending ? `, spending credits: ${short(credit.week_share_left)} left this week` : '')
+        : 'credits'));
+      if (spending) item.dataset.spending = 'true';
+      tip(item, {title: 'Codex credits', note: month ? `Spent only after the weekly limit hits 100%. This month's part is due by the end of ${monthName}.`
+        : 'Spent only after the weekly limit hits 100%',
+        rows: [...(month ? [[`Left in ${monthName}`, Math.round(credit.month_left).toLocaleString('en-US')],
+          ...(Number.isFinite(credit.week_share_left) ? [['This week\'s share left', Math.round(credit.week_share_left).toLocaleString('en-US')]] : [])] : []),
+          ['Balance', Math.round(credit.balance).toLocaleString('en-US')],
           ...(credit.per_hour ? [['Spend', `about ${Math.round(credit.per_hour)} an hour of work`], ['Lasts', `about ${Math.round(credit.balance / credit.per_hour)} work hours`],
             ['Measured on', `${Math.round(credit.sample_hours * 60)} min of use`]] : [])]});
       item.dataset.tipKey = 'codex-credits';
@@ -491,8 +515,10 @@ window.createNowView = ({node, text}) => {
     const verdicts = node('div', 'now-forecast-verdicts');
     for (const tool of tools) {
       const v = verdict(forecast[tool]), item = node('p', 'now-forecast-verdict');
+      const old = ageText(forecast[tool].last_known_age_seconds);
       item.dataset.tool = tool; item.dataset.level = v.level;
-      item.append(node('span', 'now-forecast-swatch'), node('b', '', toolName(tool)), node('span', '', v.text));
+      if (old) item.dataset.stale = 'true';
+      item.append(node('span', 'now-forecast-swatch'), node('b', '', toolName(tool)), node('span', '', (old ? `last known ${old} ago, ` : '') + v.text));
       verdicts.append(item);
     }
     const switcher = node('div', 'now-forecast-scenarios'); switcher.setAttribute('role', 'radiogroup'); switcher.setAttribute('aria-label', 'Scenario');

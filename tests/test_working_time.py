@@ -40,7 +40,7 @@ class WorkingTimeTests(unittest.TestCase):
 
     def wrapper(self, **extra):
         self.source.config.modules['codex_wrapper'] = True
-        path = self.home / '.claude/tools/codex-runs/run.json'
+        path = self.home / '.local/share/murmuratio/codex-runs/run.json'
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(dict(status='running', started=self.now - 40000, pid=7, **extra)))
 
@@ -148,7 +148,7 @@ class WorkingTimeTests(unittest.TestCase):
                      self.event('task_started', self.now - 100),
                      self.event('token_count', self.now - 40))
         self.wrapper(thread='thread')
-        path = self.home / '.claude/tools/codex-runs/run.json'
+        path = self.home / '.local/share/murmuratio/codex-runs/run.json'
         run = json.loads(path.read_text())
         run['pid'] = 8
         path.write_text(json.dumps(run))

@@ -1,8 +1,7 @@
-"""Install, remove, diagnose and run the local inspector."""
+"""Install, remove, diagnose and run Murmuratio."""
 import argparse
 import base64
 import binascii
-import ctypes
 import errno
 import hashlib
 import json
@@ -23,7 +22,6 @@ from murmuratio_app.config import Config, MODULES
 
 ROOT = Path(__file__).resolve().parent.parent
 LABEL = 'org.murmuratio.app'
-LEGACY_LABEL = 'org.agent-inspector.app'
 DEFAULT_CONFIG = ('# Optional modules are disabled by default.\n[modules]\n' +
                   ''.join(f'{name} = false\n' for name in MODULES) +
                   '\n[board]\nshow_codex_chats = false\n').encode()
@@ -38,79 +36,12 @@ class Paths:
         self.home = Path(home)
         self.settings = self.home / '.claude/settings.json'
         self.config_dir = self.home / '.config/murmuratio'
-        self.legacy_config_dir = self.home / '.config/agent-inspector'
         self.config = self.config_dir / 'config.toml'
         self.data = self.home / '.local/share/murmuratio'
-        self.legacy_data = self.home / '.local/share/agent-inspector'
         self.install = self.data / 'install'
         self.backup = self.install / 'settings.json.backup'
         self.state = self.install / 'installation.json'
         self.agent = self.home / f'Library/LaunchAgents/{LABEL}.plist'
-        self.legacy_agent = self.home / f'Library/LaunchAgents/{LEGACY_LABEL}.plist'
-
-    def select_install(self):
-        legacy = self.legacy_data / 'install'
-        old_state = legacy / 'installation.json'
-        if (old_state.exists() or old_state.is_symlink()) and (self.state.exists() or self.state.is_symlink()):
-            raise InstallError('Both old and new installation records exist; retain both and resolve the conflict')
-        if old_state.exists() or old_state.is_symlink():
-            self.install = legacy
-            self.backup = legacy / 'settings.json.backup'
-            self.state = old_state
-
-
-def move_directory(old, new):
-    """Atomically rename without replacing a destination created concurrently."""
-    libc = ctypes.CDLL(None, use_errno=True)
-    if sys.platform == 'darwin':
-        rename = libc.renamex_np
-        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
-        result = rename(os.fsencode(old), os.fsencode(new), 0x4)  # RENAME_EXCL
-    elif sys.platform.startswith('linux') and hasattr(libc, 'renameat2'):
-        rename = libc.renameat2
-        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
-        result = rename(-100, os.fsencode(old), -100, os.fsencode(new), 1)  # RENAME_NOREPLACE
-    else:
-        raise InstallError('This platform cannot safely migrate directories without replacement')
-    if result:
-        error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error), str(old), str(new))
-
-
-def migrate(paths, dry_run=False):
-    moves = []
-    for old, new in ((paths.legacy_config_dir, paths.config_dir), (paths.legacy_data, paths.data)):
-        if old.is_symlink() or new.is_symlink():
-            raise InstallError(f'Refusing to migrate a symlink: {old if old.is_symlink() else new}')
-        if old.exists() and not new.exists():
-            if not old.is_dir():
-                raise InstallError(f'Expected a directory: {old}')
-            moves.append((old, new))
-    if dry_run:
-        if moves:
-            print('Would migrate legacy configuration and/or data to murmuratio.')
-        return []
-    moved = []
-    try:
-        for old, new in moves:
-            new.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            if new.exists() or new.is_symlink():
-                raise InstallError(f'Migration destination appeared: {new}')
-            move_directory(old, new)
-            moved.append((old, new))
-    except (OSError, InstallError):
-        for old, new in reversed(moved):
-            if not old.exists() and not old.is_symlink():
-                move_directory(new, old)
-        raise
-    if moved:
-        print('Migrated legacy configuration and/or data to murmuratio.', flush=True)
-    return moved
-
-
-def planned_config(paths):
-    legacy = paths.legacy_config_dir / 'config.toml'
-    return legacy if not paths.config_dir.exists() and legacy.is_file() else paths.config
 
 
 def sha(data):
@@ -318,7 +249,8 @@ def read_plan(paths, config, demo=False, config_path=None):
                  found.claude_sessions / '*/*.jsonl', found.claude_sessions / '*/*/subagents/*.jsonl',
                  found.claude_desktop / '*/*/local_*.json',
                  found.codex_rollouts / '*/*/*/rollout-*.jsonl'):
-        print(f'  {path}')
+        if path is not None:
+            print(f'  {path}')
     if config.modules['codex_wrapper']:
         print(f'  {found.codex_wrapper}/*.json')
         print('  Event paths referenced by those wrapper files')
@@ -335,6 +267,9 @@ def read_plan(paths, config, demo=False, config_path=None):
         print(f'  {found.codex_home}/goals_1.sqlite (on context reset)')
         print(f'  {found.codex_home}/config.toml and the bundled Codex executable (on context reset)')
         print('  The Codex process may read additional paths it controls.')
+    if config.codex_live_limits:
+        print(f'  {config.codex_cli or "codex on PATH"} app-server, every 5 minutes (account/rateLimits/read;'
+              ' Codex contacts OpenAI and reads paths it controls)')
     print('  Any paths read by the previous statusLine command are controlled by that command.')
 
 
@@ -365,7 +300,7 @@ def installation_plan(paths, config, args, state, original):
             print(f'  {"change" if original is not None else "create"}: {paths.settings}')
         else:
             print('  Claude statusLine skipped: Claude directory not found')
-        if not planned_config(paths).exists():
+        if not paths.config.exists():
             print(f'  create: {paths.config}')
     else:
         print('  Existing installation is retained.')
@@ -374,11 +309,6 @@ def installation_plan(paths, config, args, state, original):
                 print(f'  save settings backup in: {paths.state}')
             print(f'  {"change" if original is not None else "create"}: {paths.settings}')
             print(f'  change: {paths.state}')
-        if state.get('agent_sha'):
-            agent, label = owned_agent(paths, state)
-            if label == LEGACY_LABEL:
-                print(f'  replace and reload: {agent} -> {paths.agent}')
-                print(f'  change: {paths.state}')
     print(f'  statusLine cache when Claude runs: {paths.data}/claude-limits.json')
     if args.launch_agent and (state is None or not state.get('agent_sha')):
         print(f'  create and load: {paths.agent}')
@@ -419,73 +349,17 @@ def add_agent(paths, state, port):
 
 
 def owned_agent(paths, state):
-    matches = []
-    for path, label in ((paths.agent, LABEL), (paths.legacy_agent, LEGACY_LABEL)):
-        if path.is_symlink():
-            raise InstallError(f'Refusing to use LaunchAgent symlink: {path}')
-        if path.is_file() and sha(path.read_bytes()) == state['agent_sha']:
-            matches.append((path, label))
-    if len(matches) != 1:
+    if paths.agent.is_symlink():
+        raise InstallError(f'Refusing to use LaunchAgent symlink: {paths.agent}')
+    if not paths.agent.is_file() or sha(paths.agent.read_bytes()) != state['agent_sha']:
         raise InstallError('LaunchAgent was changed or removed; installation record was retained')
-    return matches[0]
-
-
-def migrate_agent(paths, state):
-    old, label = owned_agent(paths, state)
-    if label == LABEL:
-        return
-    check_agent_available(paths)
-    try:
-        plist = plistlib.loads(old.read_bytes())
-        arguments = plist['ProgramArguments']
-        if plist.get('Label') != LEGACY_LABEL or not isinstance(arguments, list):
-            raise ValueError('invalid legacy LaunchAgent')
-        matches = [i for i, arg in enumerate(arguments) if isinstance(arg, str) and Path(arg).name == 'agent-inspector']
-        if len(matches) != 1:
-            raise ValueError('legacy CLI not found')
-        arguments[matches[0]] = str(ROOT / 'murmuratio')
-        plist['Label'] = LABEL
-        updated = plistlib.dumps(plist)
-    except (ValueError, KeyError, TypeError, plistlib.InvalidFileException) as exc:
-        raise InstallError('Cannot migrate the existing LaunchAgent; it was retained') from exc
-    create_new(paths.agent, updated)
-    target = f'gui/{os.getuid()}'
-    was_loaded = subprocess.run(['launchctl', 'print', f'{target}/{LEGACY_LABEL}'], capture_output=True).returncode == 0
-    booted_new = False
-    stopped_old = False
-    try:
-        if was_loaded:
-            if subprocess.run(['launchctl', 'bootout', f'{target}/{LEGACY_LABEL}'], capture_output=True).returncode:
-                raise InstallError('Could not unload the old LaunchAgent; it was retained')
-            stopped_old = True
-        if subprocess.run(['launchctl', 'bootstrap', target, str(paths.agent)], capture_output=True).returncode:
-            raise InstallError('Could not load the new LaunchAgent; the old one was retained')
-        booted_new = True
-        previous_sha = state['agent_sha']
-        state['agent_sha'] = sha(updated)
-        try:
-            save_state(paths, state)
-        except Exception:
-            state['agent_sha'] = previous_sha
-            raise
-    except Exception as exc:
-        if booted_new:
-            if subprocess.run(['launchctl', 'bootout', f'{target}/{LABEL}'], capture_output=True).returncode:
-                raise InstallError('Could not stop the new LaunchAgent after migration failed; both plist files were retained') from exc
-        if stopped_old:
-            if subprocess.run(['launchctl', 'bootstrap', target, str(old)], capture_output=True).returncode:
-                paths.agent.unlink(missing_ok=True)
-                raise InstallError('Could not restart the old LaunchAgent after migration failed; its plist was retained') from exc
-        paths.agent.unlink(missing_ok=True)
-        raise
-    old.unlink()
-    print(f'Migrated LaunchAgent: {LABEL}')
+    return paths.agent, LABEL
 
 
 def validate_install(paths, args):
     state = recover_hook_install(paths, load_state(paths), args.dry_run)
     original, settings = settings_bytes(paths.settings)
-    config_path = planned_config(paths)
+    config_path = paths.config
     if config_path.is_symlink():
         raise InstallError(f'Refusing to use symlink: {config_path}')
     config = Config.load(paths.home, config_path)
@@ -496,8 +370,6 @@ def validate_install(paths, args):
             raise InstallError('The installed statusLine was changed; restore it before reinstalling')
         if not state.get('hook_installed', True) and paths.settings.parent.is_dir():
             old_command(settings)
-        if state.get('agent_sha') and owned_agent(paths, state)[1] == LEGACY_LABEL:
-            check_agent_available(paths)
     else:
         old_command(settings)
         if paths.backup.exists() or paths.backup.is_symlink():
@@ -518,7 +390,11 @@ def install(paths, args):
         status = dict(settings['statusLine']) if isinstance(settings.get('statusLine'), dict) else {'type': 'command'}
         status['command'] = command
         new_settings = patch_status(original if original is not None else b'{}\n', json.dumps(status, ensure_ascii=False)) if use_hook else None
-        state = {'version': 1, 'settings_existed': original is not None, 'command': command,
+        # Folders this install creates, so uninstall can remove them again when they are empty.
+        created = sorted({str(folder.relative_to(paths.home)) for top in (paths.install, paths.config_dir)
+                          for folder in (top, *top.parents) if folder.is_relative_to(paths.home)
+                          and folder != paths.home and not folder.exists()})
+        state = {'version': 1, 'settings_existed': original is not None, 'command': command, 'created_dirs': created,
                  'installed_settings_sha': sha(new_settings) if use_hook else '', 'created_config': not paths.config.exists(),
                  'backup_sha': sha(original) if original is not None else None, 'hook_installed': use_hook}
         if use_hook:
@@ -588,8 +464,6 @@ def install(paths, args):
             print('Installed statusLine wrapper.')
         else:
             print('Already installed.')
-    if state.get('agent_sha'):
-        migrate_agent(paths, state)
     if args.launch_agent and not state.get('agent_sha'):
         add_agent(paths, state, args.port)
         print(f'Loaded LaunchAgent: {LABEL}')
@@ -600,16 +474,21 @@ def remove_installation_files(paths):
     state = load_state(paths)
     identity = state.get('created_config_identity')
     if state['created_config'] and identity:
-        for config in (paths.config, paths.legacy_config_dir / 'config.toml'):
-            if sole_owned_file(config, identity) and config.read_bytes() == DEFAULT_CONFIG:
-                config.unlink()
-                break
+        if sole_owned_file(paths.config, identity) and paths.config.read_bytes() == DEFAULT_CONFIG:
+            paths.config.unlink()
     if (state.get('hook_installed', True) and state.get('settings_existed') and
             sole_owned_file(paths.backup, state.get('backup_identity')) and
             sha(paths.backup.read_bytes()) == state.get('backup_sha')):
         paths.backup.unlink()
     paths.state.unlink()
-    for directory in (paths.install, paths.install.parent, paths.config_dir, paths.legacy_config_dir):
+    # The status line's limits cache is only a copy of what Claude reports.
+    cache = paths.data / 'claude-limits.json'
+    if cache.is_file() and not cache.is_symlink():
+        cache.unlink()
+    created = [paths.home / name for name in state.get('created_dirs', [])
+               if isinstance(name, str) and name and not Path(name).is_absolute() and '..' not in Path(name).parts]
+    for directory in (paths.install, paths.install.parent, paths.config_dir,
+                      *sorted(created, key=lambda path: len(path.parts), reverse=True)):
         try:
             directory.rmdir()
         except FileNotFoundError:
@@ -621,7 +500,7 @@ def remove_installation_files(paths):
 
 def uninstall(paths, args):
     state = load_state(paths)
-    for directory in (paths.config_dir, paths.legacy_config_dir, paths.data, paths.legacy_data):
+    for directory in (paths.config_dir, paths.data):
         if directory.is_symlink() or directory.exists() and not directory.is_dir():
             raise InstallError(f'Refusing to remove non-directory or symlink: {directory}')
     if state is not None and paths.install.is_symlink():
@@ -635,7 +514,7 @@ def uninstall(paths, args):
     phase = state.get('uninstall')
     if phase is not None and (not isinstance(phase, dict) or not (phase.get('before_sha') is None or isinstance(phase.get('before_sha'), str))
                               or not (phase.get('after_sha') is None or isinstance(phase.get('after_sha'), str))
-                              or phase.get('agent_label') not in (None, LABEL, LEGACY_LABEL)):
+                              or phase.get('agent_label') not in (None, LABEL)):
         raise InstallError('Invalid uninstallation record; installation data was retained')
     use_hook = state.get('hook_installed', True)
     current, settings = settings_bytes(paths.settings) if use_hook else (None, {})
@@ -682,9 +561,9 @@ def uninstall(paths, args):
             agent, agent_label = owned_agent(paths, state)
         else:
             agent_label = phase['agent_label']
-            if agent_label not in (LABEL, LEGACY_LABEL):
+            if agent_label != LABEL:
                 raise InstallError('Invalid LaunchAgent recovery record')
-            agent = paths.agent if agent_label == LABEL else paths.legacy_agent
+            agent = paths.agent
             if agent.is_symlink() or agent.exists() and (not agent.is_file() or sha(agent.read_bytes()) != state['agent_sha']):
                 raise InstallError('LaunchAgent changed during uninstallation; installation record was retained')
             if not agent.exists():
@@ -790,22 +669,6 @@ def main(argv=None):
     args = parser.parse_args(argv)
     paths = Paths(Path.home())
     try:
-        if args.command in ('install', 'run'):
-            if args.command == 'install':
-                paths.select_install()  # Refuse conflicting records before moving either directory.
-                validate_install(paths, args)
-                paths = Paths(paths.home)
-            moved = migrate(paths, args.dry_run)
-            if args.command == 'run' and args.config:
-                for old, new in moved:
-                    try:
-                        relative = args.config.absolute().relative_to(old.absolute())
-                    except ValueError:
-                        continue
-                    args.config = new / relative
-                    break
-        if args.command in ('install', 'uninstall'):
-            paths.select_install()
         if args.command == 'install':
             install(paths, args)
         elif args.command == 'uninstall':
@@ -819,7 +682,7 @@ def main(argv=None):
             else:
                 doctor(paths)
         elif args.dry_run:
-            config = Config.load(paths.home, args.config or planned_config(paths)) if not args.demo else Config()
+            config = Config.load(paths.home, args.config or paths.config) if not args.demo else Config()
             read_plan(paths, config, args.demo, args.config)
             write_plan(paths, config, args.demo)
         else:

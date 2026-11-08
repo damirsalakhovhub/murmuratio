@@ -14,7 +14,7 @@ CROSS_SITE_NAVIGATION = {'Sec-Fetch-Site': 'cross-site',
                          'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document'}
 
 
-class InspectorTests(unittest.TestCase):
+class ServerTests(unittest.TestCase):
     def setUp(self):
         self.now = SimpleNamespace(state=lambda: {'agents': [], 'completed': []})
         self.http = ThreadingHTTPServer(('127.0.0.1', 0), make_handler(now=self.now))
@@ -49,9 +49,9 @@ class InspectorTests(unittest.TestCase):
 
     def test_removed_routes_and_private_files_are_unavailable(self):
         for path in ('/api/state', '/api/session?id=test', '/config.yaml', '/server.py',
-                     '/.inspector-data/reset-results.json', '/../server.py'):
+                     '/.murmuratio-data/reset-results.json', '/../server.py'):
             self.assertEqual(self.request(path)[0], 404)
-        headers = {'Content-Type': 'application/json', 'X-Inspector-Action': '1'}
+        headers = {'Content-Type': 'application/json', 'X-Murmuratio-Action': '1'}
         for path in ('/api/recording', '/api/recording/clear'):
             self.assertEqual(self.request(path, 'POST', '{}', headers)[0], 400)
 
@@ -118,7 +118,7 @@ class InspectorTests(unittest.TestCase):
                 with self.subTest(site=site, path=path):
                     headers = {**CROSS_SITE_NAVIGATION, 'Sec-Fetch-Site': site,
                                'Origin': f'http://127.0.0.1:{self.http.server_port}',
-                               'Content-Type': 'application/json', 'X-Inspector-Action': '1'}
+                               'Content-Type': 'application/json', 'X-Murmuratio-Action': '1'}
                     self.assertEqual(self.request(path, 'POST', '{}', headers)[0], 403)
 
     def test_requests_without_fetch_metadata_keep_existing_behavior(self):
@@ -127,7 +127,7 @@ class InspectorTests(unittest.TestCase):
         self.assertEqual(self.request('/app.js')[0], 200)
         self.assertEqual(self.request('/missing')[0], 404)
         self.assertEqual(self.request('/unknown', 'POST', '{}')[0], 403)
-        headers = {'Content-Type': 'application/json', 'X-Inspector-Action': '1'}
+        headers = {'Content-Type': 'application/json', 'X-Murmuratio-Action': '1'}
         self.assertEqual(self.request('/unknown', 'POST', '{}', headers)[0], 400)
 
     def test_known_secrets_are_masked_recursively(self):

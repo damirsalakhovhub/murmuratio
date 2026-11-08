@@ -13,6 +13,7 @@ from http.server import ThreadingHTTPServer
 from murmuratio_app.adapters.codex_sessions import CodexSource
 from murmuratio_app.context_reset import AppServer, CODEX, MODEL, VERIFIED_VERSION, ResetController, ResetError, _flags, has_fresh_window
 from murmuratio_app.server import make_handler, sanitize
+from tests.helpers import chats_config
 
 ID = '01234567-0123-4567-89ab-0123456789ab'
 
@@ -293,13 +294,13 @@ class ResetTests(unittest.TestCase):
         self.assertEqual(ResetController(self.codex, self.directory).results, controller.results)
 
     def test_http_reset_requires_local_origin(self):
-        server=ThreadingHTTPServer(('127.0.0.1',0),make_handler(self.codex,reset=self.controller))
+        server=ThreadingHTTPServer(('127.0.0.1',0),make_handler(self.codex,reset=self.controller,config=chats_config(context_reset=True)))
         thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
         self.addCleanup(lambda:(server.shutdown(),server.server_close(),thread.join()))
         authority=f'127.0.0.1:{server.server_port}'
         def post(origin=None):
             c=http.client.HTTPConnection('127.0.0.1',server.server_port)
-            headers={'Content-Type':'application/json','X-Inspector-Action':'1'}
+            headers={'Content-Type':'application/json','X-Murmuratio-Action':'1'}
             if origin: headers['Origin']=origin
             c.request('POST','/api/codex/reset/prepare',json.dumps({'id':ID}),headers)
             r=c.getresponse();status=r.status;data=json.loads(r.read());c.close();return status,data

@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from murmuratio_app.adapters.codex_sessions import CodexSource
 from murmuratio_app.server import sanitize
+from tests.helpers import chats_config
 
 class CodexTests(unittest.TestCase):
     def setUp(self):
@@ -20,6 +21,17 @@ class CodexTests(unittest.TestCase):
         self.add('response_item',{'type':'message','role':role,'content':[{'type':'input_text','text':text}]})
     def record(self,rid,inp,total):
         self.add('token_usage_record',{'response_id':rid,'usage':{'input_tokens':inp,'cached_input_tokens':10,'output_tokens':5,'reasoning_output_tokens':2,'total_tokens':inp+5},'thread_token_usage':{'input_tokens':total,'output_tokens':5,'total_tokens':total+5}})
+    def test_chat_list_has_no_age_cutoff_and_is_newest_first(self):
+        # Codex's own thread index lists every saved chat; no rollout is opened for the list.
+        import time
+        now = int(time.time())
+        c = sqlite3.connect(self.home/'state_5.sqlite')
+        for tid, age in (('month-old', 30 * 86400), ('yesterday', 86400), ('year-old', 365 * 86400)):
+            c.execute('INSERT INTO threads VALUES(?,?,?,?,?,?,?,?,?,?)', (tid, tid, now - age, '/project', 'm', 0, 'vscode', '/root', 1, str(self.home/'sessions/missing.jsonl')))
+        c.commit(); c.close()
+        ids = [s['id'] for s in self.source.state()['sessions']]
+        self.assertEqual(ids, ['yesterday', 'month-old', 'year-old', 'chat'])
+
     def test_sidebar_reads_live_sections_order_and_project_assignments(self):
         db=sqlite3.connect(self.home/'state_5.sqlite')
         for name in ['thread_section_id TEXT','section_position INTEGER','project_id TEXT','is_pinned INTEGER','recency_at INTEGER']:
@@ -198,12 +210,12 @@ class CodexTests(unittest.TestCase):
         c.execute('ALTER TABLE threads ADD COLUMN name TEXT')
         c.execute("UPDATE threads SET name='Short name'");c.commit();c.close()
         self.assertEqual(self.source.state()['sessions'][0]['name'],'Short name')
-        server=ThreadingHTTPServer(('127.0.0.1',0),make_handler(self.source,'http://agent-inspector.localhost:1355'))
+        server=ThreadingHTTPServer(('127.0.0.1',0),make_handler(self.source,'http://murmuratio.localhost:1355',config=chats_config()))
         thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
         try:
             for peer,expected in [('::1',200),('::ffff:127.0.0.1',200),('127.0.0.1, 203.0.113.10',403)]:
                 h=http.client.HTTPConnection('127.0.0.1',server.server_port)
-                h.request('GET','/api/codex/state',headers={'Host':'agent-inspector.localhost:1355','X-Forwarded-For':peer})
+                h.request('GET','/api/codex/state',headers={'Host':'murmuratio.localhost:1355','X-Forwarded-For':peer})
                 r=h.getresponse();r.read();self.assertEqual(r.status,expected);h.close()
         finally:server.shutdown();server.server_close();thread.join()
 

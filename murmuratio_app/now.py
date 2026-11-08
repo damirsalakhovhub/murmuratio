@@ -1,22 +1,27 @@
 """Session snapshots and local quota history for Claude and Codex routing."""
 import json
+import os
 from pathlib import Path
+import shutil
 import threading
 import time
 from murmuratio_app.config import Config
 from murmuratio_app.common import local_day, pid_alive
 from murmuratio_app.grouping import retain_agents, link_parents as group_parents, merge_codex_sources
 from murmuratio_app.history import read_limit_history, limit_history_additions, replace_text
-from murmuratio_app.metrics.quota import quota_routing, week_forecast
+from murmuratio_app.metrics.quota import balance_at, credits_expiry, quota_routing, week_forecast
 from murmuratio_app.metrics.usage import burn_by_model as calculate_burn, claude_usage_totals, credit_totals
 from murmuratio_app.adapters.claude import ClaudeDesktopAdapter, ClaudeSessionsAdapter
 from murmuratio_app.adapters.wrapper import CodexWrapperAdapter
 from murmuratio_app.adapters.codex_board import CodexBoardAdapter, HISTORY_SECONDS
 from murmuratio_app.adapters.usage import ClaudeUsageAdapter, CodexMeterAdapter
-from murmuratio_app.adapters.quota_sources import ClaudeLimitsAdapter, CodexLimitsAdapter
+from murmuratio_app.adapters.quota_sources import ClaudeLimitsAdapter, CodexLimitsAdapter, app_server_limits
 from murmuratio_app.discovery import Discovery
 from murmuratio_app.adapters.shared import JsonlSummary
 from murmuratio_app.adapters.base import read_error_reason
+
+
+LIVE_LIMITS_SECONDS = 300
 
 
 def web_build():
@@ -76,7 +81,7 @@ class NowSource:
             self.source_reasons[name] = read_error_reason(exc)
             return default
 
-    def _background_usage(self, name, key, now, collect):
+    def _background_usage(self, name, key, now, collect, interval=None):
         """Return the last complete snapshot while one refresh runs off the request path."""
         def refresh():
             try:
@@ -92,19 +97,19 @@ class NowSource:
 
         with self.usage_lock:
             cached = self.usage_cache.get(name)
-            interval = 600 if cached and cached['status'] == 'available' else 30
+            interval = interval or (600 if cached and cached['status'] == 'available' else 30)
             if (name not in self.usage_running and
                     (not cached or cached['key'] != key or now - cached['at'] >= interval)):
                 self.usage_running.add(name)
-                threading.Thread(target=refresh, name='inspector-' + name, daemon=True).start()
+                threading.Thread(target=refresh, name='murmuratio-' + name, daemon=True).start()
             return cached if cached and cached['key'] == key else None
 
     def _collect_codex_usage(self, now, credits, burn):
         result = self.codex_meter_adapter.read(now, credits, burn)
         if result.status in ('absent', 'unavailable') and not result.observations:
             return result.status, None
-        value, readings = credit_totals(result.values(), credits)
-        return result.status, (value, readings)
+        value, readings, points = credit_totals(result.values(), credits, now)
+        return result.status, (value, readings, points)
 
     def _collect_claude_usage(self, since, desktop, split, burn):
         result = self.claude_usage_adapter.read(since, desktop, burn)
@@ -174,11 +179,20 @@ class NowSource:
     def codex_limits(self):
         return self._read_adapter(self.codex_limits_adapter)
 
-    def routing(self, limits, now, credits=None):
+    def _collect_codex_live(self):
+        command = self.config.codex_cli or shutil.which('codex', path=os.pathsep.join(
+            [os.environ.get('PATH', ''), '/opt/homebrew/bin', '/usr/local/bin']))
+        if not command:
+            return 'absent', None
+        return 'available', app_server_limits(str(command), clock=self.clock)
+
+    def routing(self, limits, now, credits=None, ages=None, write=True):
         modules = self.config.modules
         path = self.config.limits_history
         history, prune = read_limit_history(path, now) if modules['forecast'] or modules['routing'] else ([], False)
-        additions = limit_history_additions(limits, history, now) if modules['forecast'] or modules['routing'] else []
+        # History gets only fresh samples: a stale one would be stamped with the wrong time.
+        fresh = {tool: windows for tool, windows in limits.items() if tool not in (ages or {})}
+        additions = limit_history_additions(fresh, history, now) if modules['forecast'] or modules['routing'] else []
         history.extend(additions)
         self.forecast = {tool: week_forecast(tool, next((w for w in limits.get(tool, []) if w['window_minutes'] == 10080), None),
                                              history, now) for tool in ('claude', 'codex')} if modules['forecast'] or modules['burn_rate'] else {}
@@ -189,12 +203,20 @@ class NowSource:
             elif additions:
                 with path.open('a') as stream:
                     stream.writelines(json.dumps(row, allow_nan=False) + '\n' for row in additions)
+        for tool, age in (ages or {}).items():
+            if self.forecast.get(tool):
+                self.forecast[tool]['last_known_age_seconds'] = age
         if not modules['routing']:
             return None
-        routing = quota_routing(limits, history, now, credits, self.config.work_hours[1] - self.config.work_hours[0])
-        target = self.config.routing_file
-        target.parent.mkdir(parents=True, exist_ok=True)
-        replace_text(target, json.dumps(routing, indent=2, allow_nan=False) + '\n')
+        routing = quota_routing(limits, history, now, credits, self.config.work_hours[1] - self.config.work_hours[0],
+                                credits_expiry(now, *self.config.credits_expire))
+        for tool, age in (ages or {}).items():
+            if routing[tool]['used_percent'] is not None:
+                routing[tool]['last_known_age_seconds'] = age
+        if write:
+            target = self.config.routing_file
+            target.parent.mkdir(parents=True, exist_ok=True)
+            replace_text(target, json.dumps(routing, indent=2, allow_nan=False) + '\n')
         return routing
 
     def state(self):
@@ -236,10 +258,19 @@ class NowSource:
                          or now - (a.get('ended') or a.get('last_at') or 0) < HISTORY_SECONDS)]
             agents.sort(key=lambda a: (a['status'] != 'working', -(a['last_at'] or 0)))
             completed.sort(key=lambda a: -(a['ended'] or 0))
+            live = None
+            if self.config.codex_live_limits:
+                # Codex writes limits only while it works; ask Codex itself every 5 minutes.
+                snapshot = self._background_usage('codex_live_limits', 'live', now, self._collect_codex_live, LIVE_LIMITS_SECONDS)
+                if snapshot:
+                    self.source_statuses['codex_live_limits'] = snapshot['status']
+                    live = snapshot['value']
+                    if live is not None:
+                        self.codex_limits_adapter.live = live[:2]
             limits = {'codex': self._isolate('codex_limits', [], self.codex_limits),
                       'claude': self._isolate('claude_limits', [], self.claude_limits)}
             modules = self.config.modules
-            credits, self.codex_readings = None, []
+            credits, self.codex_readings, credit_points = None, [], []
             if modules['codex_credits'] or modules['burn_rate']:
                 include_credits, include_burn = modules['codex_credits'], modules['burn_rate']
                 snapshot = self._background_usage('codex_meter', (include_credits, include_burn), now,
@@ -247,13 +278,36 @@ class NowSource:
                 if snapshot:
                     self.source_statuses['codex_meter'] = snapshot['status']
                     if snapshot['value'] is not None:
-                        credits, self.codex_readings = snapshot['value']
+                        credits, self.codex_readings, credit_points = snapshot['value']
             if not modules['codex_credits']:
                 credits = None
+            elif credits is not None:
+                credits = dict(credits)  # the scan's cached value stays unchanged
+            if modules['codex_credits'] and live and live[2] is not None and live[0] > ((credits or {}).get('at') or 0):
+                # A newer balance from the live read; the spend rate stays the scan's.
+                credits = {**(credits or {'per_hour': None, 'sample_credits': 0.0, 'sample_hours': 0.0}),
+                           'balance': live[2], 'at': live[0]}
             self.forecast = {}
-            routing_limits = {kind: [] if getattr(self, kind + '_limits_adapter').stale else windows
+            # A stale sample stays as the last known value, marked with its age; only a window
+            # past its reset is dropped, because its percentage no longer applies.
+            routing_limits = {kind: [w for w in windows if w['resets_at'] is None or w['resets_at'] > now]
                               for kind, windows in limits.items()}
-            routing = self._isolate('quota_history', None, lambda: self.routing(routing_limits, now, credits)) if modules['forecast'] or modules['routing'] or modules['burn_rate'] else None
+            ages = {kind: getattr(self, kind + '_limits_adapter').age_seconds
+                    for kind in limits if getattr(self, kind + '_limits_adapter').stale}
+            codex_reset = next((w['resets_at'] for w in routing_limits['codex'] if w['window_minutes'] == 10080), None)
+            week_start = balance_at(credit_points, codex_reset - 7 * 86400) if credits and codex_reset is not None else None
+            if week_start is not None:
+                credits['week_start_balance'] = week_start  # credits spent this week count against its share
+            # Right after start the credit scan and the live Codex read are still running: routing from
+            # those partial inputs is shown but not written, so orchestrators keep the previous file.
+            with self.usage_lock:
+                warming = ((modules['codex_credits'] and 'codex_meter' not in self.usage_cache)
+                           or (self.config.codex_live_limits and 'codex_live_limits' not in self.usage_cache))
+            routing = self._isolate('quota_history', None, lambda: self.routing(routing_limits, now, credits, ages, not warming)) if modules['forecast'] or modules['routing'] or modules['burn_rate'] else None
+            month = (routing or {}).get('codex', {}).get('credits')
+            if credits and month:
+                credits.update(month_left=month['month_left'], month_ends_at=month['month_ends_at'],
+                               week_share_left=month.get('week_share_left'))
             forecast = getattr(self, 'forecast', {})
             codex_week = forecast.get('codex')
             if codex_week and modules['codex_credits']:
@@ -285,14 +339,11 @@ class NowSource:
             for name, issue in issues.items():
                 if self.source_reasons.get(name):
                     issue['reason'] = self.source_reasons[name]
-            if 'claude_limits' in issues:
-                issues['claude_limits']['age_seconds'] = self.claude_limits_adapter.age_seconds
-                if self.claude_limits_adapter.stale and issues['claude_limits']['status'] != 'stale':
-                    issues['claude_limits']['stale'] = True
-            if 'codex_limits' in issues:
-                issues['codex_limits']['age_seconds'] = self.codex_limits_adapter.age_seconds
-                if self.codex_limits_adapter.stale and issues['codex_limits']['status'] != 'stale':
-                    issues['codex_limits']['stale'] = True
+            for adapter in (self.claude_limits_adapter, self.codex_limits_adapter):
+                if adapter.name in issues:
+                    issues[adapter.name]['age_seconds'] = adapter.age_seconds
+                    if adapter.stale and issues[adapter.name]['status'] != 'stale':
+                        issues[adapter.name]['stale'] = True
             if issues:
                 state['sources'] = issues
             self.last_snapshot = self.sanitize(state)

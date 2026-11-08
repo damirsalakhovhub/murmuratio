@@ -37,8 +37,8 @@ Reads by default:
 - Claude Code transcripts and subagent records: `~/.claude/projects/`. Claude desktop session metadata: `~/Library/Application Support/Claude/claude-code-sessions/`.
 - Saved Codex sessions and usage-limit events: `~/.codex/sessions/`. Exec workers, Codex subagents and Claude-linked workers appear without a wrapper or optional module. Interactive app and CLI chats are hidden from projects by default; running chats appear as `Your Codex chats: N` in the header. `CODEX_HOME` selects the Codex data directory.
 - Local open-file information from macOS `lsof`, to check whether an inactive Codex rollout still has a writer.
-- Claude limits caches: `~/.local/share/murmuratio/claude-limits.json` and legacy `~/.claude/tools/claude-limits.json`. The newest usable snapshot is selected.
-- With `codex_wrapper`: compatible run records in `~/.claude/tools/codex-runs/` and the event files they reference. Murmuratio does not create wrapper records.
+- Claude limits cache: `~/.local/share/murmuratio/claude-limits.json`, plus an optional extra cache set as `claude_limits` under `[paths]`. The newest usable snapshot is selected.
+- With `codex_wrapper`: compatible run records in `~/.local/share/murmuratio/codex-runs/` (set `codex_runs` under `[paths]`) and the event files they reference. Murmuratio does not create wrapper records.
 - With `codex_chats`: `~/.codex/state_5.sqlite` and its WAL/SHM files, `~/.codex/.codex-global-state.json`, and referenced rollouts under `sessions/` or `archived_sessions/` in the Codex data directory.
 
 Writes:
@@ -47,19 +47,19 @@ Writes:
 - Installation records and settings backups: `~/.local/share/murmuratio/install/`.
 - When `~/.claude` exists: `~/.claude/settings.json`, to wrap `statusLine` while preserving the previous command. The wrapper writes the Claude limits cache above.
 - With `--launch-agent`: `~/Library/LaunchAgents/org.murmuratio.app.plist`.
-- Optional forecast and routing read and write `~/.claude/tools/limits-history.jsonl`; routing also writes `~/.claude/tools/routing.json`. These paths and the wrapper directory are configurable.
+- Optional forecast and routing read and write `~/.local/share/murmuratio/limits-history.jsonl`; routing also writes `~/.local/share/murmuratio/routing.json`. These paths and the wrapper directory are configurable.
 - Optional context reset also reads `goals_1.sqlite` and `config.toml` in the Codex data directory, keeps recovery state at `~/.local/share/murmuratio/reset/reset-results.json`, and can change Codex data.
 - Browser preferences stay in local browser storage.
 
 `./murmuratio run --dry-run` lists the active paths.
 
-Sends: nothing during normal use. The HTTP server listens only on `127.0.0.1` and makes no model or account API calls. The previous status-line command and an explicitly confirmed experimental context reset can run software with its own network activity. See [SECURITY.md](SECURITY.md).
+Sends: nothing during normal use. With `[limits] codex_live = true`, Codex itself reads your account's limits from OpenAI every 5 minutes. The HTTP server listens only on `127.0.0.1` and makes no model or account API calls. The previous status-line command and an explicitly confirmed experimental context reset can run software with its own network activity. See [SECURITY.md](SECURITY.md).
 
 ## Accuracy limits
 
 - Claude native subagents are included in their parent turn and do not have separate cards.
-- Codex discovery covers saved sessions modified in the last 24 hours. A quiet session may disappear after that even if its rollout is still open for writing; a new saved event makes it discoverable again. Ephemeral sessions without saved rollouts are invisible.
-- Launch classification uses `session_meta.source` (`exec` or a `subagent` object for workers; `cli`, `tui` or `vscode` for interactive chats), with `originator` as a fallback. A Claude parent link or wrapper record identifies a worker regardless of the interactive launch metadata. Finished cards leave the board after 30 minutes; their recent history still contributes to today's totals.
+- An unfinished Codex worker stays on the board however long it is quiet; finished and crashed ones leave. Rollouts older than a day are checked by their first record and last lifecycle event and reread only when they change, so startup stays fast with months of history. The Codex chats tab lists every saved chat from Codex's own index, newest first. Ephemeral sessions without saved rollouts are invisible.
+- Launch classification uses `session_meta.source` (`exec` or a `subagent` object for workers; `cli`, `tui` or `vscode` for interactive chats), with `originator` as a fallback. Codex Desktop threads whose `thread_source` says an agent created or forked them are workers. A Claude parent link or wrapper record identifies a worker regardless of the interactive launch metadata. Finished cards leave the board after 30 minutes; their recent history still contributes to today's totals.
 - Claude-to-Codex parent links use recorded identifiers when available. Otherwise, a unique working-directory and launch-time match within about two minutes is marked inferred and may be wrong. Indirect or delayed launches may be missed.
 - Very large records may be read partially or skipped. Codex board reads buffer records up to 8 MiB; larger turn boundaries receive limited handling.
 - Status and context are inferred from saved data. Quiet unfinished Claude turns remain working for up to 24 hours after their last saved activity; silence alone never means approval is needed. Usage-limit numbers are snapshots and may be stale.
@@ -71,7 +71,8 @@ Sends: nothing during normal use. The HTTP server listens only on `127.0.0.1` an
 All modules are off by default. Set them to `true` under `[modules]` in `~/.config/murmuratio/config.toml`, then restart:
 
 - `forecast`: estimates usage limits; `scenarios` compares forecasts and requires `forecast`.
-- `routing`: suggests a tool; `codex_credits` shows credit usage; `burn_rate` shows token usage rates.
+- `routing`: writes a suggestion of which tool should take code and which design, so neither weekly quota is left unused at its reset. A tool whose remaining quota would last past its reset at the current pace gets more work; when both would, code goes to the one that resets first; a tool that cannot cover another work day gets less. Other scripts can read the suggestion from `routing.json`. Codex credits, which are spent only after the Codex weekly limit reaches 100%, are planned per month until they expire (`[routing] credits_expire = "MM-DD"`, default `"12-31"`) and per week within the month; this week's share counts as extra Codex capacity.
+- `codex_credits`: shows the credit balance left this month; `burn_rate` shows token usage rates.
 - `codex_chats`: shows saved chats; `context_reset` enables experimental resets and requires `codex_chats`.
 - `codex_wrapper`: reads wrapper records; `branding` adds board graphics.
 
@@ -84,13 +85,22 @@ show_codex_chats = true
 
 This setting is independent of the `codex_chats` module, which enables the saved-chat browser tab.
 
+Codex writes its limits to session logs only while it works, so a quiet Codex shows its last known values with their age. To keep them current, add this section and restart:
+
+```toml
+[limits]
+codex_live = true
+```
+
+Every 5 minutes Murmuratio then starts `codex app-server` and sends one `account/rateLimits/read` request, the read the Codex app uses to show remaining limits and credits. It makes no model call and changes nothing, but Codex contacts OpenAI with your signed-in account. The `codex` command is found on `PATH`, in `/opt/homebrew/bin` or `/usr/local/bin`; set `codex_cli` under `[paths]` to choose another.
+
 ## Uninstall
 
 ```sh
 ./murmuratio uninstall
 ```
 
-This restores the previous status line and removes files the installer owns. Existing or edited configuration and other data are kept. Older installations without file ownership records may leave their configuration or backup in place.
+This restores the previous status line and removes files the installer owns, the status line's limits cache and the folders the installer created when they are empty. Existing or edited configuration and other data, such as routing and history files, are kept. Older installations without file ownership records may leave their configuration or backup in place.
 
 ## Disclaimer
 

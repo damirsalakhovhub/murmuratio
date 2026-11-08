@@ -11,19 +11,28 @@
   const text = (el, value) => { if (el.textContent !== value) el.textContent = value; };
   const read = (key, fallback = '') => { try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; } };
   const save = (key, value) => { try { localStorage.setItem(key, value); } catch { /* Private browsing. */ } };
+  // Preferences saved under the earlier key prefix move over once.
+  try {
+    for (const key of Object.keys(localStorage)) {
+      if (!key.startsWith('inspector.')) continue;
+      const renamed = 'murmuratio.' + key.slice('inspector.'.length);
+      if (localStorage.getItem(renamed) === null) localStorage.setItem(renamed, localStorage.getItem(key));
+      localStorage.removeItem(key);
+    }
+  } catch { /* Private browsing. */ }
   const linkedCodex = new URLSearchParams(location.search).get('codex');
   let modules = {}, configKey = '';
-  let source = linkedCodex ? 'codex' : read('inspector.source', 'now');
+  let source = linkedCodex ? 'codex' : read('murmuratio.source', 'now');
   if (!['now', 'codex'].includes(source)) source = 'now';
-  let selected = linkedCodex || read('inspector.selected.' + source);
-  if (linkedCodex) save('inspector.selected.codex', linkedCodex);
-  let hiddenIds; try { hiddenIds = JSON.parse(read('inspector.hidden.codex', '[]')); } catch { hiddenIds = []; }
+  let selected = linkedCodex || read('murmuratio.selected.' + source);
+  if (linkedCodex) save('murmuratio.selected.codex', linkedCodex);
+  let hiddenIds; try { hiddenIds = JSON.parse(read('murmuratio.hidden.codex', '[]')); } catch { hiddenIds = []; }
   const hiddenChats = new Set(Array.isArray(hiddenIds) ? hiddenIds.filter(id => typeof id === 'string') : []);
   let chatLimit = 60;
   let nextBefore = null;
   let sessionRevision = null;
   const codexEvents = new Map();
-  let allCollapsed = read('inspector.collapsed') === 'true';
+  let allCollapsed = read('murmuratio.collapsed') === 'true';
   let generation = 0;
   let busy = false;
   let loaded = false;
@@ -38,7 +47,7 @@
   const chats = new Map();
   const sidebarGroups = new Map();
   let groupPreferences;
-  try { groupPreferences=JSON.parse(read('inspector.sidebarGroups', '{}')); } catch { groupPreferences={}; }
+  try { groupPreferences=JSON.parse(read('murmuratio.sidebarGroups', '{}')); } catch { groupPreferences={}; }
   if (!groupPreferences || Array.isArray(groupPreferences) || typeof groupPreferences !== 'object') groupPreferences={};
   let sidebarSearching = false;
   const turns = new Map();
@@ -46,7 +55,7 @@
   const numbers = new Intl.NumberFormat('en-US');
   const isCount = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
   const count = value => isCount(value) ? numbers.format(value) : 'no data';
-  const panels = window.createInspectorPanels({node, count});
+  const panels = window.createPanels({node, count});
 
   async function api(path, options = {}) {
     const response = await fetch(path, {cache: 'no-store', credentials: 'same-origin', ...options});
@@ -74,7 +83,7 @@
       summary.addEventListener('click',event=>{
         event.preventDefault();
         if(sidebarSearching)group.searchOpen=!group.searchOpen;
-        else {group.open=!group.open;groupPreferences[key]=group.open;save('inspector.sidebarGroups',JSON.stringify(groupPreferences));}
+        else {group.open=!group.open;groupPreferences[key]=group.open;save('murmuratio.sidebarGroups',JSON.stringify(groupPreferences));}
         renderChats(lastSessions);
       });
       sidebarGroups.set(key,group);
@@ -115,7 +124,7 @@
           const visible=[...$('chat-list').querySelectorAll('.chat-visibility')].filter(button=>button.getClientRects().length);
           const position=visible.indexOf(visibility),set=hiddenChats;
           if(set.has(s.id))set.delete(s.id);else set.add(s.id);
-          save('inspector.hidden.'+source,JSON.stringify([...set]));renderChats(lastSessions);
+          save('murmuratio.hidden.'+source,JSON.stringify([...set]));renderChats(lastSessions);
           const remaining=[...$('chat-list').querySelectorAll('.chat-visibility')].filter(button=>button.getClientRects().length);
           (remaining[Math.min(Math.max(position,0),remaining.length-1)] || $('show-hidden')).focus();
         });
@@ -298,7 +307,7 @@
   function select(id) {
     drawerOpen = false; paintDrawer();
     if (selected === id && loaded) return;
-    selected = id; generation++; loaded = false; lastAnalysis = null; save('inspector.selected.' + source, id);
+    selected = id; generation++; loaded = false; lastAnalysis = null; save('murmuratio.selected.' + source, id);
     $('reset-context').hidden = true;
     $('reset-result').hidden = true;
     codexEvents.clear(); nextBefore = null; sessionRevision = null;
@@ -351,13 +360,13 @@
   }
   async function switchSource(name) {
     if (source === name || (name === 'codex' && !modules.codex_chats)) return;
-    source=name;$('show-hidden').checked=false;save('inspector.source',name);generation++;loaded=false;selected='';
+    source=name;$('show-hidden').checked=false;save('murmuratio.source',name);generation++;loaded=false;selected='';
     chats.clear();lastSessions=[];lastSidebar={};turns.clear();ui.open.clear();ui.full.clear();codexEvents.clear();lastData=null;
     $('chat-list').replaceChildren();$('feed').replaceChildren();$('analysis').hidden=true;
     $('collapse-all').hidden=true;$('older-events').hidden=true;moreChats.hidden=true;
     $('new-events').hidden=true;$('session-error').hidden=true;syncSource();
     if (source==='now') { void poll(); return; }
-    select(read('inspector.selected.'+source));
+    select(read('murmuratio.selected.'+source));
     text($('session-title'), selected ? 'Loading…' : 'Select a chat');
     void poll();
   }
@@ -447,7 +456,7 @@
   $('reset-confirm').addEventListener('click',async()=>{
     if (resetStarting || resetDialogId!==selected) return;
     resetStarting=true;resetActionError='';$('reset-confirm').disabled=true;
-    const id=resetDialogId, options={method:'POST',headers:{'Content-Type':'application/json','X-Inspector-Action':'1'}};
+    const id=resetDialogId, options={method:'POST',headers:{'Content-Type':'application/json','X-Murmuratio-Action':'1'}};
     try {
       text($('reset-dialog-status'),'Confirming chat status…');
       const ready=await api('/api/codex/reset/prepare',{...options,body:JSON.stringify({id})});
@@ -468,8 +477,8 @@
   }
   for(const id of ['chat-search','show-archive','show-agents']) {
     const el=$(id);
-    if(el.type==='checkbox')el.checked=read('inspector.'+id)==='true';else el.value=read('inspector.'+id);
-    el.addEventListener('input',()=>{save('inspector.'+id,el.type==='checkbox'?String(el.checked):el.value);chatLimit=60;renderChats(lastSessions);});
+    if(el.type==='checkbox')el.checked=read('murmuratio.'+id)==='true';else el.value=read('murmuratio.'+id);
+    el.addEventListener('input',()=>{save('murmuratio.'+id,el.type==='checkbox'?String(el.checked):el.value);chatLimit=60;renderChats(lastSessions);});
   }
   $('show-hidden').addEventListener('change',()=>{chatLimit=60;renderChats(lastSessions);});
   moreChats.addEventListener('click',()=>{chatLimit+=60;renderChats(lastSessions);});
@@ -491,7 +500,7 @@
   });
   // The separator owns only sidebar geometry; it never changes source data.
   const splitter = $('sidebar-resizer'), workspace = $('workspace');
-  let preferredWidth = Number(read('inspector.sidebarWidth', '280')) || 280;
+  let preferredWidth = Number(read('murmuratio.sidebarWidth', '280')) || 280;
   let dragging = null;
   function sidebarBounds() {
     return {min: 200, max: Math.max(200, Math.min(600, workspace.clientWidth - 420))};
@@ -503,7 +512,7 @@
     splitter.setAttribute('aria-valuemin', String(min));splitter.setAttribute('aria-valuemax', String(max));
     splitter.setAttribute('aria-valuenow', String(actual));splitter.setAttribute('aria-valuetext', actual + ' pixels');
     workspace.style.setProperty('--workspace-top', Math.round(workspace.getBoundingClientRect().top + scrollY) + 'px');
-    if (persist) { preferredWidth=actual;save('inspector.sidebarWidth', String(actual)); }
+    if (persist) { preferredWidth=actual;save('murmuratio.sidebarWidth', String(actual)); }
     return actual;
   }
   splitter.addEventListener('pointerdown', e => {
@@ -532,7 +541,7 @@
   $('collapse-all').addEventListener('click', () => {
     const folds = [...$('feed').querySelectorAll('.turn-fold')];
     const collapse = folds.some(d => d.open);
-    allCollapsed = collapse; save('inspector.collapsed', String(collapse));
+    allCollapsed = collapse; save('murmuratio.collapsed', String(collapse));
     for (const d of folds) d.open = !collapse;
     text($('collapse-all'), collapse ? 'Expand all' : 'Collapse all');
   });

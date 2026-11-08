@@ -1,6 +1,7 @@
 """Usage and model-burn calculations over normalized source measurements."""
 from collections.abc import Sequence
-from murmuratio_app.metrics.quota import codex_burn, credit_spend
+from datetime import datetime
+from murmuratio_app.metrics.quota import balance_at, codex_burn, credit_spend, credit_spent_per_day
 from murmuratio_app.schema import ClaudeUsageBuckets, CodexMeter, Usage
 
 USAGE_WEIGHTS = dict(input_tokens=1, cache_creation_input_tokens=1.25, cache_read_input_tokens=0.1, output_tokens=5)
@@ -38,7 +39,7 @@ def claude_usage_totals(readings: Sequence[ClaudeUsageBuckets], since: float, in
     return (totals['worker'] / total if total else None), models
 
 
-def credit_totals(readings: Sequence[CodexMeter], include_credits: bool):
+def credit_totals(readings: Sequence[CodexMeter], include_credits: bool, now: float | None = None):
     points, usage, latest = [], [], None
     for row in readings:
         points.extend(row['points'])
@@ -50,7 +51,11 @@ def credit_totals(readings: Sequence[CodexMeter], include_credits: bool):
     per_hour, spent, seconds = credit_spend(points) if include_credits else (None, 0, 0)
     value = dict(balance=latest[1], at=latest[0], per_hour=per_hour, sample_credits=spent,
                  sample_hours=seconds / 3600) if latest else None
-    return value, usage
+    if value and include_credits and now is not None:
+        value['spent_per_day'] = credit_spent_per_day(points, now)
+        month = datetime.fromtimestamp(now).replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
+        value['month_start_balance'] = balance_at(points, month)
+    return value, usage, points
 
 
 def burn_by_model(forecast, claude_models, codex_readings):

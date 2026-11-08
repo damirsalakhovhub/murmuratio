@@ -15,7 +15,7 @@ class Discovery:
     codex_rollouts: Path
     codex_wrapper: Path
     claude_limits: Path
-    claude_limits_legacy: Path
+    claude_limits_legacy: Path | None
 
     @classmethod
     def at(cls, home, config, codex_home=None):
@@ -26,7 +26,8 @@ class Discovery:
             claude_sessions=home / '.claude/projects',
             claude_desktop=home / 'Library/Application Support/Claude/claude-code-sessions',
             codex_home=codex, codex_rollouts=codex / 'sessions',
-            codex_wrapper=config.wrapper_runs or home / '.claude/tools/codex-runs',
+            codex_wrapper=config.wrapper_runs or home / '.local/share/murmuratio/codex-runs',
             claude_limits=home / '.local/share/murmuratio/claude-limits.json',
-            claude_limits_legacy=home / '.claude/tools/claude-limits.json',
+            # An extra limits cache, for example one an older status line writes.
+            claude_limits_legacy=config.claude_limits_extra,
         )

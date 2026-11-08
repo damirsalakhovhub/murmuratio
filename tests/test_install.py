@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 class InstallTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="inspector home '")
+        self.temp = tempfile.TemporaryDirectory(prefix="murmuratio home '")
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name)
         self.paths = Paths(self.home)
@@ -54,7 +54,7 @@ class InstallTests(unittest.TestCase):
         result = subprocess.run([sys.executable, str(ROOT / 'murmuratio'), '--version'],
                                 cwd=self.home, env=self.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), 'murmuratio 0.1.0-beta')
+        self.assertEqual(result.stdout.strip(), 'murmuratio 0.2.0-beta')
         self.assertEqual(self.tree(), {})
 
     def test_no_existing_statusline_and_uninstall_twice(self):
@@ -256,9 +256,24 @@ class InstallTests(unittest.TestCase):
                     uninstall(paths, argparse.Namespace(dry_run=False))
                 self.assertEqual(paths.backup.read_bytes(), b'user-owned backup')
 
+    def test_uninstall_removes_the_limits_cache_and_folders_it_created(self):
+        self.settings(b'{}\n')
+        (self.home / '.config').mkdir()  # existed before: kept even though it ends up empty
+        before = self.tree()
+        self.assertEqual(self.cli('install').returncode, 0)
+        self.assertEqual(self.invoke_status(json.dumps({'rate_limits': {'five_hour': {'used_percentage': 5}}}).encode()).returncode, 0)
+        self.assertTrue((self.paths.data / 'claude-limits.json').is_file())
+        self.assertEqual(self.cli('uninstall').returncode, 0)
+        self.assertEqual(self.tree(), before)
+        # Other data in the data folder is kept, and so is the folder.
+        self.assertEqual(self.cli('install').returncode, 0)
+        (self.paths.data / 'routing.json').write_text('{}')
+        self.assertEqual(self.cli('uninstall').returncode, 0)
+        self.assertEqual((self.paths.data / 'routing.json').read_text(), '{}')
+
     def test_uninstall_preserves_user_hard_link_to_created_config(self):
         self.assertEqual(self.cli('install').returncode, 0)
-        other = self.paths.legacy_config_dir / 'config.toml'
+        other = self.home / 'elsewhere/config.toml'
         other.parent.mkdir(parents=True)
         os.link(self.paths.config, other)
         self.assertEqual(self.cli('uninstall').returncode, 0)
@@ -272,7 +287,7 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.tree(), before)
         for path in (self.paths.settings, self.paths.backup, self.paths.state, self.paths.config,
-                     self.paths.data / 'claude-limits.json', self.home / '.claude/tools/claude-limits.json',
+                     self.paths.data / 'claude-limits.json',
                      self.home / '.claude/projects', self.home / '.codex/sessions'):
             self.assertIn(str(path), result.stdout)
         self.assertIn(str(self.home / '.claude/projects/*/*/subagents/*.jsonl'), result.stdout)
@@ -485,7 +500,7 @@ class LimitsCacheTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name)
         self.paths = Paths(self.home)
-        self.legacy = self.home / '.claude/tools/claude-limits.json'
+        self.legacy = self.home / 'old-statusline/claude-limits.json'
         self.cache = self.paths.data / 'claude-limits.json'
         self.now = 2000000
         self.adapter = ClaudeLimitsAdapter(self.cache, self.legacy, lambda: self.now)
@@ -494,7 +509,7 @@ class LimitsCacheTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({'at': at, 'rate_limits': {'five_hour': {'used_percentage': used, 'resets_at': 3000000}}}))
 
-    def test_R4_codex_limit_freshness_and_forecast_exclusion(self):
+    def test_R4_stale_codex_limits_stay_as_last_known_values(self):
         path = self.home / '.codex/sessions/2026/11/07/rollout-test.jsonl'
         path.parent.mkdir(parents=True)
         def sample(at, reset=3000000):
@@ -516,7 +531,21 @@ class LimitsCacheTests(unittest.TestCase):
         config.modules['routing'] = True
         source = NowSource(self.home, config=config, clock=lambda: self.now)
         state = source.state()
-        self.assertEqual(state['sources']['codex_limits']['status'], 'stale')
+        # Codex writes limits only while it works: a quiet Codex must not vanish from the board.
+        self.assertEqual(state['sources']['codex_limits'], {'status': 'stale', 'age_seconds': 1801})
+        self.assertEqual(state['limits']['codex'][0]['used_percent'], 12)
+        self.assertEqual(state['forecast']['codex']['used_percent'], 12)
+        self.assertEqual(state['forecast']['codex']['last_known_age_seconds'], 1801)
+        self.assertEqual(state['routing']['codex']['used_percent'], 12)
+        self.assertEqual(state['routing']['codex']['last_known_age_seconds'], 1801)
+        routing = json.loads(config.routing_file.read_text())
+        self.assertEqual(routing['codex']['last_known_age_seconds'], 1801)
+        # The stale sample is not written to history with today's time.
+        self.assertNotIn('"codex"', config.limits_history.read_text() if config.limits_history.exists() else '')
+        # Past its reset the percentage no longer applies: the window is shown but not forecast.
+        sample(self.now - 1801, self.now - 1)
+        state = source.state()
+        self.assertEqual(state['limits']['codex'][0]['used_percent'], 12)
         self.assertIsNone(state['forecast']['codex'])
         self.assertIsNone(state['routing']['codex']['headroom'])
 
@@ -531,14 +560,15 @@ class LimitsCacheTests(unittest.TestCase):
             return read_text(path, *args, **kwargs)
         config = Config.load(self.home)
         config.modules['forecast'] = True
+        config.claude_limits_extra = self.legacy  # [paths] claude_limits
         source = NowSource(self.home, config=config, clock=lambda: self.now)
         with patch.object(Path, 'read_text', deny_primary):
             state = source.state()
         self.assertEqual(state['sources']['claude_limits']['status'], 'unavailable')
         self.assertTrue(state['sources']['claude_limits']['stale'])
-        self.assertIsNone(state['forecast']['claude'])
+        self.assertIsNone(state['forecast']['claude'])  # only a 5-hour window, so no weekly forecast
 
-    def test_missing_and_stale_have_age_and_stale_is_not_used_for_forecasts(self):
+    def test_missing_and_stale_have_age_and_keep_last_known_values(self):
         missing = self.adapter.read()
         self.assertEqual(missing.status, 'absent')
         self.assertIsNone(missing.age_seconds)
@@ -553,7 +583,7 @@ class LimitsCacheTests(unittest.TestCase):
         state = source.state()
         self.assertEqual(state['sources']['claude_limits'], {'status': 'stale', 'age_seconds': CLAUDE_LIMITS_STALE_SECONDS + 1})
         self.assertEqual(state['limits']['claude'][0]['used_percent'], 12)
-        self.assertIsNone(state['forecast']['claude'])
+        self.assertIsNone(state['forecast']['claude'])  # only a 5-hour window, so no weekly forecast
         self.assertFalse(config.limits_history.exists())
 
     def test_newest_cache_wins_even_if_other_file_was_modified_later(self):

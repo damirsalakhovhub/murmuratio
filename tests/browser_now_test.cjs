@@ -6,8 +6,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..');
-const artifacts = path.join(root, '.inspector-data/now-verification');
-const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'inspector-board-'));
+const artifacts = path.join(root, '.murmuratio-data/now-verification');
+const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'murmuratio-board-'));
 const fixtureConfig = path.join(fixtureRoot, 'config.toml');
 fs.writeFileSync(fixtureConfig, '[modules]\nforecast = true\nscenarios = true\nrouting = true\ncodex_credits = true\nburn_rate = true\ncodex_chats = true\ncontext_reset = true\ncodex_wrapper = true\nbranding = true\n');
 const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import main; main()', '--port', '0', '--config', fixtureConfig,
@@ -53,7 +53,7 @@ const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import
       task: 'Fix display labels', started: at(18, 22), ended: at(18, 27), seconds: 300, head: 'a1b2c3d', verdict: 'REPORT DUMP '.repeat(200)});
     let payload = {now, agents: [gameplay, icons, arts, inspector, atlas, northstar, harbor], completed: [done]}, polls = 0, fail = false;
     const page = await browser.newPage(); track(page);
-    await page.evaluateOnNewDocument(() => localStorage.setItem('inspector.source', 'now'));
+    await page.evaluateOnNewDocument(() => localStorage.setItem('murmuratio.source', 'now'));
     await page.setViewport({width: 1280, height: 1000, deviceScaleFactor: 1});
     await page.emulateMediaFeatures([{name: 'prefers-color-scheme', value: 'light'}]);
     await page.setRequestInterception(true);
@@ -412,14 +412,15 @@ const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import
     payload = {now, agents: [unknown, quiet], completed: [],
       limits: {codex: [{window_minutes: 10080, used_percent: 12, resets_at: now + 3600}],
         claude: [{window_minutes: 300, used_percent: 10, resets_at: now + 3600}]},
-      sources: {codex_limits: {status: 'stale'}, claude_limits: {status: 'unavailable', stale: true},
+      sources: {codex_limits: {status: 'stale', age_seconds: 2160}, claude_limits: {status: 'unavailable', stale: true},
         codex_sessions: {status: 'unavailable', reason: 'permission_denied'}}};
     await page.waitForSelector('[data-agent-id="unknown"]');
     assert.equal(await value('unknown', '.now-word'), 'Unknown', 'R2 unknown status is visible');
     assert.deepEqual(await parts('unknown', '.now-time'), ['18:00'], 'T1 unknown duration is omitted');
     assert.match(await value('quiet', '.now-current'), /Quiet/, 'S1 quiet work is labelled');
     assert.equal(await page.$eval('[data-agent-id="quiet"] .now-current', e => getComputedStyle(e).display !== 'none' && e.getBoundingClientRect().width > 0), true);
-    assert.match(await page.$eval('[data-tool="codex"]', e => e.textContent), /stale/i, 'R4 stale quota is labelled');
+    assert.match(await page.$eval('[data-tool="codex"]', e => e.textContent), /week, 36m old/, 'R4 stale quota keeps its value with its age');
+    assert.match(await page.$eval('[data-tool="codex"]', e => e.getAttribute('aria-label')), /12% used, last known 36m ago/);
     assert.match(await page.$eval('[data-tool="claude"]', e => e.textContent), /stale/i, 'R4 stale fallback is labelled');
     assert.match(await page.$eval('#now-error', e => e.textContent), /Codex session logs can't be read: permission denied/);
     for (const theme of ['light', 'dark']) {

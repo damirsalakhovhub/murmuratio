@@ -1,5 +1,5 @@
 'use strict';
-window.createInspectorPanels = ({node, count}) => {
+window.createPanels = ({node, count}) => {
   let signature='';
   const finite=n=>typeof n==='number' && Number.isFinite(n);
   const date=s=>s ? new Date(s).toLocaleString('en-GB',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}) : '—';
@@ -108,7 +108,7 @@ window.createInspectorPanels = ({node, count}) => {
     table.append(tbody);const scroll=node('div','compaction-table-scroll');scroll.append(table);compactDetails.append(scroll);
     compactDetails.append(node('p','muted','After is the input of the first recorded request after compaction, including instructions and new data, not the summary size. Δ compares consecutive compactions only with the same model and limit. A missing measurement is not zero.'));
     compactDetails.append(node('p','muted','Requests are recorded model calls, not user messages. The latest interval is still open. The chart shows available measurements from zero, oldest on the left.'));
-    compactDetails.append(node('p','muted','This hint is an inspector heuristic: at least 70% of the window remains used, or usage grows over three compactions. It is not an OpenAI rule or a measure of retained decisions. Model, instruction and report size changes affect the result.'));
+    compactDetails.append(node('p','muted','This hint is a Murmuratio heuristic: at least 70% of the window remains used, or usage grows over three compactions. It is not an OpenAI rule or a measure of retained decisions. Model, instruction and report size changes affect the result.'));
     compact.append(fold('compactions','Compaction history',compactDetails));
     if(a.malformed_records)compact.append(node('p','error',`Skipped malformed records: ${count(a.malformed_records)}`));
     root.replaceChildren(context,spend,model,compact);

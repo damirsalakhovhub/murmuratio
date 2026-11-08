@@ -13,11 +13,16 @@ from murmuratio_app.common import one_line, timestamp
 HISTORY_SECONDS = 24 * 60 * 60
 MAX_RECORD_BYTES = 512 * 1024
 MAX_BUFFERED_BYTES = 8 * 1024 * 1024
+AGENT_THREAD_SOURCES = ('agent_created_thread', 'agent_forked_thread', 'subagent')
 
 
 def interactive_session(data):
     """Use launch metadata, never task text, to recognize a person's chat."""
     source, originator = data.get('source'), data.get('originator')
+    # Codex Desktop records threads that an agent opened (for example a chat persona starting a
+    # worker) with the same source and originator as a person's chat; only thread_source differs.
+    if data.get('thread_source') in AGENT_THREAD_SOURCES:
+        return False
     if source == 'exec' or originator == 'codex_exec' or isinstance(source, dict) and 'subagent' in source:
         return False
     return source in ('cli', 'tui', 'vscode') or originator in ('Codex Desktop', 'codex_cli_rs', 'codex-tui')
@@ -83,6 +88,7 @@ def consume_rollout(data, record):
         if isinstance(spawn, dict) and isinstance(spawn.get('parent_thread_id'), str):
             data['_parent_thread'] = spawn['parent_thread_id']
         data['originator'] = payload.get('originator')
+        data['thread_source'] = payload.get('thread_source')
         if isinstance(payload.get('model'), str):
             data['model'] = payload['model']
         for field in ('parent_session', 'parent_app_session', 'run_id'):
@@ -207,15 +213,59 @@ class BoardSummary:
         except (ValueError, TypeError, UnicodeError, OverflowError):
             pass
 
+LIFECYCLE = (b'"task_started"', b'"turn_started"', b'"task_complete"', b'"turn_complete"',
+             b'"turn_aborted"', b'"task_aborted"')
+TAIL_BYTES = 256 * 1024
+
+
+def open_worker(path):
+    """Cheap check of an old rollout: is it a worker whose last turn never finished?
+
+    Reads the first record for the launch metadata and the file's tail for the last lifecycle event.
+    A tail with no lifecycle event counts as open, so a long quiet turn is never missed."""
+    with path.open('rb') as stream:
+        first = stream.readline(MAX_RECORD_BYTES + 1)
+        size = stream.seek(0, 2)
+        stream.seek(max(0, size - TAIL_BYTES))
+        tail = stream.read()
+    data = {}
+    try:
+        record = json.loads(first)
+        if isinstance(record, dict) and record.get('type') == 'session_meta':
+            consume_rollout(data, record)
+    except (ValueError, TypeError, UnicodeError, OverflowError):
+        return True
+    if interactive_session(data) and not (data.get('parent_session') or data.get('parent_app_session')):
+        return False
+    for line in reversed(tail.split(b'\n')[1:] if size > TAIL_BYTES else tail.split(b'\n')):
+        if not any(marker in line for marker in LIFECYCLE):
+            continue
+        try:
+            record = json.loads(line)
+        except (ValueError, UnicodeError):
+            continue
+        payload = record.get('payload') if isinstance(record, dict) else None
+        event = payload.get('type') if isinstance(payload, dict) else None
+        if event in ('task_started', 'turn_started'):
+            return True
+        if event in ('task_complete', 'turn_complete', 'turn_aborted', 'task_aborted'):
+            return False
+    return True
+
+
 class CodexBoardAdapter(Adapter):
     name = 'codex_sessions'
 
     def __init__(self, root, project):
         super().__init__()
         self.root, self.project, self.cache = Path(root), project, {}
+        # Old rollouts: (mtime_ns, size) -> whether it is an open worker. Unchanged files are not reread.
+        self.old = {}
+        # Rollouts found with no writer, by (mtime_ns, size): crashed until the file changes.
+        self.crashed = {}
 
     def collect(self, now):
-        seen = set()
+        seen, old_seen = set(), set()
         stale = []
         root = self.root.resolve()
         for path in self.files('*/*/*/rollout-*.jsonl'):
@@ -223,8 +273,16 @@ class CodexBoardAdapter(Adapter):
                 if not path.resolve().is_relative_to(root):
                     self.unsupported()
                     continue
-                if now - path.stat().st_mtime > HISTORY_SECONDS:
-                    continue
+                st = path.stat()
+                if now - st.st_mtime > HISTORY_SECONDS:
+                    # Past a day only an unfinished worker stays, however long it is quiet.
+                    key = (st.st_mtime_ns, st.st_size)
+                    known = self.old.get(path)
+                    if not known or known[0] != key:
+                        known = self.old[path] = (key, open_worker(path))
+                    old_seen.add(path)
+                    if not known[1]:
+                        continue
                 seen.add(path)
                 data, modified = self.cache.setdefault(path, BoardSummary()).refresh(path)
                 if data.get('_unsupported_lifecycle'):
@@ -265,21 +323,29 @@ class CodexBoardAdapter(Adapter):
                     data.get('last_at') or modified, 'inferred')
                 agent = observation.value
                 if state not in ('done', 'blocked', 'unknown') and now - agent['last_at'] > CODEX_DEAD_SECONDS:
-                    stale.append((path, observation))
+                    stale.append((path, observation, (st.st_mtime_ns, st.st_size)))
                 else:
                     yield observation
             except OSError:
                 self.unavailable()
         if stale:
-            writers = rollout_writers([path for path, _ in stale])
+            unknown = [path for path, _, key in stale if self.crashed.get(path) != key]
+            writers = rollout_writers(unknown) if unknown else set()
             if writers is None:
                 self.unavailable()
-            for path, observation in stale:
+            for path, observation, key in stale:
                 agent = observation.value
-                if writers is not None and path not in writers:
+                crashed = self.crashed.get(path) == key or (writers is not None and path not in writers)
+                if crashed:
+                    # A file with no writer stays crashed until it changes.
+                    self.crashed[path] = key
+                    if path in self.old:
+                        self.old[path] = (self.old[path][0], False)
                     agent.update(status='crashed', completed=True, ended=agent['last_at'],
                                  seconds=agent['_stopped_seconds'],
                                  verdict='CRASHED: no live process and no activity for over 30 minutes')
                     agent.pop('waiting_since', None)
                 yield observation
         self.cache = {path: value for path, value in self.cache.items() if path in seen}
+        self.old = {path: value for path, value in self.old.items() if path in old_seen}
+        self.crashed = {path: key for path, key in self.crashed.items() if path in seen}

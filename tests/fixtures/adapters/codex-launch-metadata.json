@@ -2,6 +2,11 @@
   "exec": {"source": "exec", "originator": "codex_exec"},
   "exec_originator": {"originator": "codex_exec"},
   "desktop": {"source": "vscode", "originator": "Codex Desktop"},
+  "desktop_user": {"source": "vscode", "originator": "Codex Desktop", "thread_source": "user",
+                   "cli_version": "0.166.0-alpha.6", "history_mode": "paginated"},
+  "desktop_agent_created": {"source": "vscode", "originator": "Codex Desktop", "thread_source": "agent_created_thread",
+                            "cli_version": "0.167.0-alpha.3.2", "history_mode": "paginated"},
+  "desktop_agent_forked": {"source": "vscode", "originator": "Codex Desktop", "thread_source": "agent_forked_thread"},
   "cli": {"source": "cli", "originator": "codex_cli_rs"},
   "desktop_originator": {"originator": "Codex Desktop"},
   "subagent": {

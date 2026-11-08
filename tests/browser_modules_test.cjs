@@ -11,7 +11,7 @@ const brandedIndex = fs.readFileSync(path.join(root, 'web/index.html'), 'utf8').
   '  <!-- murmuratio-branding -->', fs.readFileSync(path.join(root, 'web/branding.html'), 'utf8').trimEnd());
 const disabled = Object.fromEntries(['forecast', 'scenarios', 'routing', 'codex_credits', 'burn_rate',
   'codex_chats', 'context_reset', 'codex_wrapper', 'branding'].map(key => [key, false]));
-const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'inspector-demo-'));
+const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'murmuratio-demo-'));
 const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import main; main()', '--demo', '--port', '0', '--config', '/unreadable/personal.toml'],
   {cwd: root, env: {...process.env, HOME: temp, PORTLESS_URL: ''}, stdio: ['ignore', 'pipe', 'pipe']});
 let browser;
@@ -56,8 +56,8 @@ let browser;
   assert(['forecast', 'routing', 'burn', 'credits'].every(key => !(key in first)));
   assert.equal(await demo.$$eval('.now-card.need', es => es.length), 1, 'worker approval requires attention');
   assert.equal(await demo.$eval('#now-summary', e => e.textContent.includes('1 needs attention')), true);
-  fs.mkdirSync(path.join(root, '.inspector-data'), {recursive: true});
-  await demo.screenshot({path: path.join(root, '.inspector-data/opensource-demo.png'), fullPage: true});
+  fs.mkdirSync(path.join(root, '.murmuratio-data'), {recursive: true});
+  await demo.screenshot({path: path.join(root, '.murmuratio-data/opensource-demo.png'), fullPage: true});
   await demo.close();
   const emptyBurn = await browser.newPage();
   await emptyBurn.evaluateOnNewDocument(() => localStorage.setItem('now-block-view', 'burn'));
@@ -121,6 +121,15 @@ let browser;
   assert.equal(await forecast.$('.now-forecast-value svg'), null);
   assert.equal(await forecast.$('.reset-mark'), null);
   await forecast.close();
+
+  // R4: a stale Codex sample stays on the chart as the last known value, with its age.
+  fixture.forecast.codex.last_known_age_seconds = 7200;
+  const lastKnown = await pageWith(forecastConfig);
+  await lastKnown.waitForSelector('.now-forecast-verdict[data-tool="codex"][data-stale="true"]');
+  assert.match(await lastKnown.$eval('.now-forecast-verdict[data-tool="codex"]', e => e.textContent), /^Codexlast known 2h ago, /);
+  assert.equal(await lastKnown.$eval('.now-forecast-verdict[data-tool="claude"]', e => e.dataset.stale), undefined);
+  delete fixture.forecast.codex.last_known_age_seconds;
+  await lastKnown.close();
 
   const changing = {modules: {...disabled, forecast: true, branding: true}, project_order: [], work_hours: [9, 21]};
   const togglePage = await pageWith(changing);

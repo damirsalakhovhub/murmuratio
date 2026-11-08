@@ -2,7 +2,6 @@
 // Turns saved Codex events into a readable activity view: what was asked, what the agent did, what it replied.
 // Raw records stay one click away; model requests only feed the per-turn usage line.
 window.createActivity = ({node, count}) => {
-  const isErrorStatus = status => status === 'Error' || status === 'Ошибка';
   const finite = n => typeof n === 'number' && Number.isFinite(n);
   const short = n => {
     if (!finite(n)) return '—';
@@ -135,7 +134,7 @@ window.createActivity = ({node, count}) => {
   // Codex wraps every script result; pull out wall time, exit codes and the plain outputs.
   function describeResult(raw, status) {
     const text = String(raw || '');
-    const res = {seconds: null, failed: isErrorStatus(status), output: text};
+    const res = {seconds: null, failed: status === 'Error', output: text};
     const wall = /Wall time ([\d.]+) seconds/.exec(text);
     if (wall) res.seconds = Number(wall[1]);
     if (/^Script (failed|error)/i.test(text)) res.failed = true;
@@ -234,10 +233,6 @@ window.createActivity = ({node, count}) => {
     if (!parts.length) parts.push(tools.length ? plural(tools.length, 'step') : 'thought');
     const text = parts.join(', ');
     return {text: text[0].toUpperCase() + text.slice(1), failed: tools.filter(s => s.outcome?.failed).length, running: tools.some(s => !s.result)};
-  }
-  function stepLabel(step) {
-    if (step.type === 'thought') return plain(step.textOf?.() || '');
-    return `${step.info.verb} ${step.info.target}`.trim();
   }
 
   // ---------- Rendering ----------

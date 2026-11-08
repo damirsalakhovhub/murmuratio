@@ -1,7 +1,7 @@
 """Explicit, local-only context reset through the bundled Codex app server.
 
 This module does not start work until the user confirms a particular chat in
-the inspector. It never edits rollouts or changes the user's global config.
+Murmuratio. It never edits rollouts or changes the user's global config.
 """
 from collections import deque
 from datetime import datetime, timezone
@@ -168,7 +168,7 @@ class AppServer:
         return msg.get('result', {})
 
     def initialize(self):
-        self.rpc('initialize', {'clientInfo': {'name': 'agent_inspector', 'version': '1.0'},
+        self.rpc('initialize', {'clientInfo': {'name': 'murmuratio', 'version': '1.0'},
                                 'capabilities': {'experimentalApi': True}})
         self.send({'method': 'initialized', 'params': {}})
         # Project or managed config can add tools absent from the user config.
@@ -247,7 +247,7 @@ class ResetController:
         for result in self.results.values():
             if isinstance(result, dict) and result.get('state') == 'running':
                 result.update({'state': 'error', 'reset_applied': None,
-                    'error': 'The inspector restarted during the operation. The reset result is unknown.',
+                    'error': 'Murmuratio restarted during the operation. The reset result is unknown.',
                     'restore_error': 'Check the chat model and permissions in Codex.'})
             if isinstance(result, dict) and isinstance(result.get('original_settings'), dict):
                 result['restore_error'] = recovery_message(result['original_settings'])
@@ -573,4 +573,4 @@ class ResetController:
                 try:
                     self._save()
                 except OSError:
-                    job['storage_error'] = 'Could not save the result after the inspector restarted.'
+                    job['storage_error'] = 'Could not save the result after Murmuratio restarted.'

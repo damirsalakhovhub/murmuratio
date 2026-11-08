@@ -13,9 +13,9 @@ npm ci --prefix tests
 npm run test:browser --prefix tests
 ```
 
-The real-board test stages synthetic session files and exercises the server and browser without intercepting API requests.
+The clean-machine test installs, runs and uninstalls in a fresh home with Claude only, Codex only and neither, and checks that nothing is left behind. The real-board test stages synthetic session files and exercises the server and browser without intercepting API requests.
 
-Set `CHROME_PATH` to the browser executable if it is not found automatically. Screenshots are written to the ignored `.inspector-data/` directory.
+Set `CHROME_PATH` to the browser executable if it is not found automatically. Screenshots are written to the ignored `.murmuratio-data/` directory.
 
 ## Release smoke
 

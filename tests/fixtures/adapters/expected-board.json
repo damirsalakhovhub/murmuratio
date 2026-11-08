@@ -111,11 +111,27 @@
       "remaining": 75,
       "resets_at": 2600000.0,
       "days_left": 6.944444444444445,
-      "allowance_per_day": 10.799999999999999,
+      "allowance_per_day": 10.807955801104972,
       "burn_per_day": 0,
-      "headroom": 10.799999999999999
+      "headroom": 10.807955801104972,
+      "credits": {
+        "balance": 80.0,
+        "expires_at": 5456000,
+        "days_left": 40.0,
+        "burn_per_day": 0,
+        "month_ends_at": 2864000,
+        "month_left": 26.666666666666664,
+        "month_pool": 26.666666666666668,
+        "weeks_left_in_month": 1.4365079365079365,
+        "week_share": 18.56353591160221,
+        "week_share_left": 18.56353591160221,
+        "week_share_percent": 0.05524861878453038,
+        "per_hour": 400,
+        "per_hour_measured": false
+      },
+      "credits_percent": 0.23809523809523808
     },
-    "reason": "Both tools have sufficient headroom, so Codex leads code and Claude leads design."
+    "reason": "Both tools have sufficient headroom, so Codex leads code and Claude leads design. Codex's week includes 19 credits after its limit hits 100%."
   },
   "forecast": {
     "claude": {
@@ -151,7 +167,13 @@
         "at": 1999900.0,
         "per_hour": null,
         "sample_credits": 0.0,
-        "sample_hours": 0.0
+        "sample_hours": 0.0,
+        "spent_per_day": 0.0,
+        "month_start_balance": 80.0,
+        "month_left": 26.666666666666664,
+        "month_ends_at": 2864000,
+        "week_start_balance": 80.0,
+        "week_share_left": 18.56353591160221
       }
     }
   },
@@ -181,6 +203,12 @@
     "at": 1999900.0,
     "per_hour": null,
     "sample_credits": 0.0,
-    "sample_hours": 0.0
+    "sample_hours": 0.0,
+    "spent_per_day": 0.0,
+    "month_start_balance": 80.0,
+    "month_left": 26.666666666666664,
+    "month_ends_at": 2864000,
+    "week_start_balance": 80.0,
+    "week_share_left": 18.56353591160221
   }
 }

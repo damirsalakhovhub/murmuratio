@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..');
-const artifacts = path.join(root, '.inspector-data/codex-verification');
+const artifacts = path.join(root, '.murmuratio-data/codex-verification');
 let fixtureRoot;
 function fixture(){execFileSync('python3',['-c',String.raw`
 import json,sqlite3,sys
@@ -49,7 +49,7 @@ try {
  browser=await puppeteer.launch({executablePath:chromePath(),headless:true,args:['--disable-background-networking','--disable-sync','--disable-extensions']});
  const page=await browser.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
  await page.setViewport({width:1440,height:1100,deviceScaleFactor:1});
- await page.evaluateOnNewDocument(()=>localStorage.setItem('inspector.source','codex'));
+ await page.evaluateOnNewDocument(()=>localStorage.setItem('murmuratio.source','codex'));
  await page.setRequestInterception(true);
  page.on('request',request=>new URL(request.url()).pathname==='/api/now'
    ? request.respond({status:200,contentType:'application/json',body:JSON.stringify({now:Date.now()/1000,agents:[],completed:[]})})
@@ -111,27 +111,26 @@ try {
  await page.waitForSelector('.chat-row');assert.equal(await page.$('.favorite'),null);
  const noReset = await browser.newPage();
  let resetRequests = 0;
- // Keep this legacy input to verify Russian error-status parsing.
- const statuses = ['Ошибка','Error',null];
- const legacySession = {...snapshot,revision:'legacy:1',next_before:null,event_count:statuses.length,
+ const statuses = ['Error',null];
+ const failedSession = {...snapshot,revision:'failed:1',next_before:null,event_count:statuses.length,
    events:statuses.map((status,index)=>({id:'tool-'+index,index,kind:'tool_result',status,
      group_id:'turn-'+index,blocks:[{text:'Tool response'}]}))};
- await noReset.evaluateOnNewDocument(()=>localStorage.setItem('inspector.source','codex'));
+ await noReset.evaluateOnNewDocument(()=>localStorage.setItem('murmuratio.source','codex'));
  await noReset.setRequestInterception(true);
  noReset.on('request',request=>{
    const endpoint = new URL(request.url()).pathname;
    if (endpoint.startsWith('/api/codex/reset/')) resetRequests++;
    if (endpoint === '/api/config') request.respond({status:200,contentType:'application/json',body:JSON.stringify({
      modules:{codex_chats:true,context_reset:false},project_order:[],work_hours:[9,21]})});
-   else if (endpoint === '/api/codex/session') request.respond({status:200,contentType:'application/json',body:JSON.stringify(legacySession)});
+   else if (endpoint === '/api/codex/session') request.respond({status:200,contentType:'application/json',body:JSON.stringify(failedSession)});
    else request.continue();
  });
  await noReset.goto(base+'/?codex=chat-0',{waitUntil:'networkidle0'});
  await noReset.waitForSelector('#analysis:not([hidden])');
  assert.equal(await noReset.$eval('#reset-context',e=>e.hidden),true);
  assert.equal(resetRequests,0,'disabled reset never polls the backend');
- assert.deepEqual(await noReset.$$eval('.turn',es=>es.map(e=>e.classList.contains('failed'))),[true,true,false]);
- assert.deepEqual(await noReset.$$eval('.work-meta',es=>es.map(e=>e.textContent)),['1 failed','1 failed','']);
+ assert.deepEqual(await noReset.$$eval('.turn',es=>es.map(e=>e.classList.contains('failed'))),[true,false]);
+ assert.deepEqual(await noReset.$$eval('.work-meta',es=>es.map(e=>e.textContent)),['1 failed','']);
  await noReset.close();
  assert.deepEqual(errors,[]);
  console.log('PASS: 2000 chats, bounded list, project search, archive/agents, sidebar width persistence, source tabs/keyboard, context/cache/compaction, pagination, safe text, wide/narrow DPR1/2, no JS errors');

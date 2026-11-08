@@ -141,7 +141,7 @@ Config.load = classmethod(broken_load)''',
         config = self.home / '.config/murmuratio/config.toml'
         config.parent.mkdir(parents=True)
         config.write_text('[modules]\nforecast = true\nrouting = true\ncodex_wrapper = true\n')
-        wrapper = self.home / '.claude/tools/codex-runs/example.json'
+        wrapper = self.home / '.local/share/murmuratio/codex-runs/example.json'
         wrapper.parent.mkdir(parents=True)
         wrapper.write_text(json.dumps({'status': 'running', 'started': self.now - 10,
                                        'cwd': '/synthetic/project', 'title': 'PRIVATE WRAPPER'}))

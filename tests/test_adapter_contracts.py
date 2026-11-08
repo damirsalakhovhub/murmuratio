@@ -16,6 +16,7 @@ from murmuratio_app.schema import Observation
 from murmuratio_app.config import Config, MODULES
 from murmuratio_app.now import NowSource
 from murmuratio_app.server import make_handler
+from tests.helpers import chats_config
 
 FIXTURES = Path(__file__).resolve().parent / 'fixtures/adapters'
 NOW = 2_000_000
@@ -68,7 +69,7 @@ class AdapterContractTests(unittest.TestCase):
             self.write_fixture(self.config.wrapper_runs / 'run-1.json', 'codex-wrapper.json', scenario)
             return lambda: self.source.wrapper_adapter.read(NOW, set())
         if kind == 'claude_limits':
-            self.write_fixture(self.home / '.claude/tools/claude-limits.json', 'claude-limits.json', scenario)
+            self.write_fixture(self.home / '.local/share/murmuratio/claude-limits.json', 'claude-limits.json', scenario)
             return self.source.claude_limits_adapter.read
         if kind in ('codex_limits', 'codex_meter'):
             path = self.home / '.codex/sessions/1970/01/24/rollout-1.jsonl'
@@ -160,7 +161,10 @@ class AdapterContractTests(unittest.TestCase):
         for kind in ('claude_sessions', 'claude_desktop', 'codex_wrapper', 'claude_limits', 'codex_limits'):
             self.setup_adapter(kind, 'good')
         self.config.modules.update({name: True for name in MODULES})
-        with patch('murmuratio_app.now.web_build', return_value='fixture-build'):
+        # Credit expiry is a local calendar day; fix it so the fixture does not depend on the host timezone.
+        with patch('murmuratio_app.now.web_build', return_value='fixture-build'), \
+                patch('murmuratio_app.now.credits_expiry', return_value=NOW + 40 * 86400), \
+                patch('murmuratio_app.metrics.quota.credit_month', return_value=(NOW - 86400, NOW + 10 * 86400, 3)):
             actual = self.source.state()
             deadline = time.monotonic() + 3
             while time.monotonic() < deadline:
@@ -259,18 +263,18 @@ class AdapterContractTests(unittest.TestCase):
         path = self.home / '.codex/sessions/1970/01/24/rollout-1.jsonl'
         self.write_fixture(path, 'codex-rollout.jsonl', 'malformed')
         self.config.modules['codex_credits'] = True
-        status, (credits, readings) = self.source._collect_codex_usage(NOW, True, False)
+        status, (credits, readings, _) = self.source._collect_codex_usage(NOW, True, False)
         self.assertIsNone(credits)
         self.assertEqual(status, 'unsupported')
         self.write_fixture(path, 'codex-rollout.jsonl', 'good')
         os.utime(path, (NOW + 1, NOW + 1))
-        status, (credits, readings) = self.source._collect_codex_usage(NOW + 1, True, False)
+        status, (credits, readings, _) = self.source._collect_codex_usage(NOW + 1, True, False)
         self.assertEqual(credits['balance'], 80)
         self.assertEqual(status, 'available')
 
     def test_missing_codex_database_is_reported_by_api(self):
         codex = CodexSource(self.home / '.codex', lambda x: x)
-        server = ThreadingHTTPServer(('127.0.0.1', 0), make_handler(codex=codex))
+        server = ThreadingHTTPServer(('127.0.0.1', 0), make_handler(codex=codex, config=chats_config()))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(thread.join)

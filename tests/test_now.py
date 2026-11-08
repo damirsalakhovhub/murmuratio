@@ -17,7 +17,8 @@ from murmuratio_app.adapters.parsing import consume_codex_meter, consume_credits
 from murmuratio_app.adapters.shared import claude_status, codex_status, current_action
 from murmuratio_app.adapters.limits import limit_window
 from murmuratio_app.common import pid_alive, timestamp
-from murmuratio_app.metrics.quota import codex_burn, credit_spend, quota_routing, week_forecast, weekly_pace
+from murmuratio_app.metrics.quota import (balance_at, codex_burn, credit_month, credit_spend, credit_spent_per_day, credits_expiry,
+                                          quota_routing, week_forecast, weekly_pace)
 from murmuratio_app.server import make_handler, sanitize
 
 
@@ -27,7 +28,7 @@ class NowTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name)
         self.now = datetime(2026, 11, 5, 12, tzinfo=timezone.utc).timestamp()
-        self.runs = self.home / '.claude/tools/codex-runs'
+        self.runs = self.home / '.local/share/murmuratio/codex-runs'
         self.runs.mkdir(parents=True)
         config = Config.load(self.home)
         config.modules = {name: True for name in MODULES}
@@ -57,7 +58,7 @@ class NowTests(unittest.TestCase):
 
     def claude(self, name='session', cwd=None, modified=None, stop='end_turn'):
         path = self.home / '.claude/projects/project' / (name + '.jsonl')
-        self.append(path, dict(type='user', cwd=cwd or str(self.home / '.claude/tools'), timestamp=self.now - 100,
+        self.append(path, dict(type='user', cwd=cwd or str(self.home / '.claude/scripts'), timestamp=self.now - 100,
                                message={'content': [{'type': 'text', 'text': 'First task line\nMore instructions'}]}))
         self.append(path, dict(type='assistant', timestamp=self.now - 50,
                                message={'model': 'claude-opus-5-5', 'stop_reason': stop,
@@ -78,7 +79,7 @@ class NowTests(unittest.TestCase):
         self.desktop('northstar', 'local_northstar')
         self.write_run('cli', parent_session='harbor', parent_app_session='local_northstar')
         self.write_run('app', parent_session='unknown', parent_app_session='local_harbor')
-        self.write_run('from', from_cwd=str(self.home / '.claude/tools'))
+        self.write_run('from', from_cwd=str(self.home / '.claude/scripts'))
         self.write_run('legacy')
         self.write_run('inspector', target=str(Path(__file__).resolve().parent.parent))
         self.write_run('inspector-nested', target=str(Path(__file__).resolve().parent.parent / 'web'))
@@ -295,7 +296,7 @@ class NowTests(unittest.TestCase):
         self.assertNotIn('claude:orch', {a['id'] for a in self.source.state()['agents']})
 
     def test_claude_limits_iso_and_epoch_resets_and_invalid_files(self):
-        path = self.home / '.claude/tools/claude-limits.json'
+        path = self.home / '.local/share/murmuratio/claude-limits.json'
         self.assertEqual(self.source.claude_limits(), [])
         path.write_text(json.dumps({'rate_limits': {
             'five_hour': {'used_percentage': 82, 'resets_at': '2026-11-06T12:00:00Z'},
@@ -330,7 +331,7 @@ class NowTests(unittest.TestCase):
                 self.assertIsNone(timestamp(value))
                 self.assertIsNone(limit_window(dict(window_minutes=value, used_percent=20)))
                 self.assertIsNone(limit_window(dict(window_minutes=300, used_percent=value)))
-        path = self.home / '.claude/tools/claude-limits.json'
+        path = self.home / '.local/share/murmuratio/claude-limits.json'
         path.write_text('{"rate_limits":{"seven_day":{"used_percentage":20,"resets_at":Infinity}}}')
         state = self.source.state()
         self.assertIsNone(state['limits']['claude'][0]['resets_at'])
@@ -400,15 +401,160 @@ class NowTests(unittest.TestCase):
         self.assertEqual(routing['tiers']['codex'], dict(simple='luna', hard='luna'))
         self.assertEqual(routing['tiers']['claude'], dict(simple='Sonnet', hard='Sonnet'))
         self.assertIn('deferred', routing['reason'])
-        # At headroom 1 the strict reroute condition does not apply.
-        self.assertEqual(route(30, 93)['code_to'], 'codex')
+        # Codex exactly on pace while the Claude week would go unused: Claude takes the code.
+        self.assertEqual(route(30, 93)['code_to'], 'claude')
+        self.assertEqual(route(93, 30)['code_to'], 'codex')
         routing = quota_routing({'claude': [self.week(30, 10)], 'codex': [self.week(88, 10)]}, [], self.now)
         self.assertEqual(routing['leader'], 'default')
         for claude, codex in ((30, 40), (30, 95), (95, 30), (95, 96)):
             self.assertLessEqual(set(route(claude, codex)['tiers']['codex'].values()), {'luna', 'sol'})
 
+    def nov8_route(self, claude_used=87, claude_days=0.49, claude_burn=18,
+                   codex_used=99, codex_days=1.11, codex_burn=4, credits=True, spent=1000):
+        claude_reset, codex_reset = self.now + claude_days * 86400, self.now + codex_days * 86400
+        limits = {'claude': [dict(window_minutes=10080, used_percent=claude_used, resets_at=claude_reset)],
+                  'codex': [dict(window_minutes=10080, used_percent=codex_used, resets_at=codex_reset)]}
+        history = [self.history_point(1, claude_used - claude_burn, claude_reset),
+                   self.history_point(1, codex_used - codex_burn, codex_reset, tool='codex')]
+        # 156 hours of credits at 4%/day over 12 work hours = 52% extra, as on 2026-11-08.
+        # 61,000 credits expiring in 53 days: a budget of about 1,151 credits a day.
+        balance = dict(balance=61000, per_hour=61000 / 156, spent_per_day=spent)
+        return quota_routing(limits, history, self.now, credits=balance if credits else None,
+                             credits_expire_at=self.now + 53 * 86400)
+
+    def test_routing_adds_this_weeks_credit_share_to_codex(self):
+        routing = self.nov8_route()
+        self.assertAlmostEqual(routing['codex']['credits_percent'], 52)
+        credits = routing['codex']['credits']
+        # Credits expire in December: November gets half, due by the end of November, split over the
+        # Codex weeks left in November (this one whole, later ones by their part in the month).
+        december = datetime(2026, 12, 1).timestamp()
+        self.assertEqual((credits['month_left'], credits['month_pool'], credits['month_ends_at']), (30500, 30500, december))
+        weeks = 1 + (december - (self.now + 1.11 * 86400)) / (7 * 86400)
+        self.assertAlmostEqual(credits['weeks_left_in_month'], weeks)
+        self.assertAlmostEqual(credits['week_share_left'], 30500 / weeks)
+        share = 30500 / weeks / (61000 / 156) * 4 / 12  # credits to weekly % at today's Codex pace
+        self.assertAlmostEqual(credits['week_share_percent'], share)
+        self.assertAlmostEqual(routing['codex']['allowance_per_day'], (1 + share) / 1.11)
+        self.assertEqual((credits['expires_at'], credits['burn_per_day']), (self.now + 53 * 86400, 1000))
+        self.assertNotIn('target_per_day', credits)
+        # 1% left plus this week's share puts the Codex week under pace too, but Claude's quota is
+        # lost first (0.49 days against 1.11), so Claude takes the code until its reset.
+        self.assertGreaterEqual(routing['codex']['headroom'], 1.2)
+        self.assertEqual((routing['leader'], routing['code_to'], routing['design_to']), ('claude', 'claude', 'claude'))
+        self.assertIn('until its weekly reset', routing['reason'])
+        self.assertIn(f"includes {credits['week_share_left']:.0f} credits", routing['reason'])
+        json.dumps(routing, allow_nan=False)
+        # Without credits the exhausted Codex week sends everything to Claude.
+        routing = self.nov8_route(credits=False)
+        self.assertEqual((routing['leader'], routing['code_to']), ('claude', 'claude'))
+        self.assertNotIn('credits', routing['codex'])
+
+    def test_credit_share_counts_before_any_credit_spend_is_measured(self):
+        # Live board on 2026-11-08 right after a restart: no measured credit rate yet.
+        now = datetime(2026, 11, 8, 10, 13).timestamp()
+        codex_reset, claude_reset = now + 1.0640 * 86400, now + 0.47 * 86400
+        limits = {'codex': [dict(window_minutes=10080, used_percent=99, resets_at=codex_reset)],
+                  'claude': [dict(window_minutes=10080, used_percent=88, resets_at=claude_reset)]}
+        history = [dict(at=now - 86400, tool='codex', window='week', used_percent=99 - 3.676, resets_at=codex_reset),
+                   dict(at=now - 86400, tool='claude', window='week', used_percent=88 - 18, resets_at=claude_reset)]
+        credits = dict(balance=60831.6998586665, per_hour=None, spent_per_day=0,
+                       month_start_balance=60831.6998586665, week_start_balance=60831.6998586665)
+        routing = quota_routing(limits, history, now, credits, credits_expire_at=datetime(2027, 1, 1).timestamp())
+        pool = routing['codex']['credits']
+        self.assertAlmostEqual(pool['month_left'], 60831.6998586665 / 2)
+        self.assertEqual((pool['per_hour'], pool['per_hour_measured']), (400, False))
+        self.assertAlmostEqual(pool['week_share_percent'], pool['week_share_left'] / 400 * 3.676 / 12)
+        self.assertGreater(pool['week_share_percent'], 5)
+        self.assertAlmostEqual(routing['codex']['allowance_per_day'], (1 + pool['week_share_percent']) / 1.064)
+        self.assertNotIn('no quota or credit share', routing['reason'])
+        self.assertIn('credits after its limit hits 100%', routing['reason'])
+        # An idle Codex (no burn yet) still gets its share, at an even weekly pace.
+        history[0]['used_percent'] = 99
+        pool = quota_routing(limits, history, now, credits, credits_expire_at=datetime(2027, 1, 1).timestamp())['codex']['credits']
+        self.assertAlmostEqual(pool['week_share_percent'], pool['week_share_left'] / 400 * (100 / 7) / 12)
+
+    def test_both_under_pace_code_goes_to_the_quota_lost_sooner(self):
+        # Live board on 2026-11-08 11:00: Claude 11% left, reset in 10 h, headroom 1.36; Codex 1.73.
+        def route(claude_hours, codex_hours):
+            claude_reset, codex_reset = self.now + claude_hours * 3600, self.now + codex_hours * 3600
+            limits = {'claude': [dict(window_minutes=10080, used_percent=89, resets_at=claude_reset)],
+                      'codex': [dict(window_minutes=10080, used_percent=88, resets_at=codex_reset)]}
+            days = lambda h: h / 24
+            history = [dict(at=self.now - 86400, tool='claude', window='week', used_percent=89 - 11 / days(claude_hours) / 1.36,
+                            resets_at=claude_reset),
+                       dict(at=self.now - 86400, tool='codex', window='week', used_percent=88 - 12 / days(codex_hours) / 1.73,
+                            resets_at=codex_reset)]
+            return quota_routing(limits, history, self.now)
+        routing = route(10, 22)
+        self.assertAlmostEqual(routing['claude']['headroom'], 1.36)
+        self.assertAlmostEqual(routing['codex']['headroom'], 1.73)
+        self.assertEqual((routing['leader'], routing['code_to'], routing['design_to']), ('claude', 'claude', 'claude'))
+        # After Claude's reset Codex expires first: the usual split.
+        routing = route(30, 22)
+        self.assertEqual((routing['leader'], routing['code_to'], routing['design_to']), ('default', 'codex', 'claude'))
+
+    def test_credits_already_spent_this_week_count_against_its_share(self):
+        limits = {'codex': [dict(window_minutes=10080, used_percent=100, resets_at=self.now + 2 * 86400)]}
+        history = [self.history_point(1, 90, self.now + 2 * 86400, tool='codex')]
+        def share(balance, week_start):
+            credits = dict(balance=balance, per_hour=100, month_start_balance=20000, week_start_balance=week_start)
+            return quota_routing(limits, history, self.now, credits, credits_expire_at=datetime(2026, 12, 1).timestamp())
+        # Last month before expiry: the whole balance is November's, over the weeks left.
+        fresh = share(20000, 20000)['codex']['credits']
+        spent = share(18000, 20000)['codex']['credits']
+        self.assertAlmostEqual(spent['week_share'], fresh['week_share'])
+        self.assertAlmostEqual(spent['week_share_left'], fresh['week_share'] - 2000)
+        # Share used up: the Codex week is gone, Claude has no data, Codex still leads alone.
+        self.assertEqual(share(20000 - fresh['week_share'], 20000)['codex']['credits']['week_share_left'], 0)
+
+    def test_routing_under_pace_week_gets_code_and_design(self):
+        # Claude must spend 40%/day before reset but burns 10: it takes code too.
+        routing = self.nov8_route(claude_used=20, claude_days=2, claude_burn=10,
+                                  codex_used=60, codex_days=4, codex_burn=10, credits=False)
+        self.assertEqual((routing['leader'], routing['code_to'], routing['design_to']), ('claude', 'claude', 'claude'))
+        routing = self.nov8_route(claude_used=99, claude_days=2, claude_burn=10,
+                                  codex_used=40, codex_days=2, codex_burn=10, credits=False)
+        self.assertEqual((routing['code_to'], routing['design_to']), ('codex', 'codex'))
+        self.assertIn('Claude has almost no included quota', routing['reason'])
+
+    def test_credit_month_pools_split_the_balance_until_expiry(self):
+        expiry = datetime(2027, 1, 1).timestamp()
+        nov8, dec1 = datetime(2026, 11, 8, 9).timestamp(), datetime(2026, 12, 1, 0, 30).timestamp()
+        self.assertEqual(credit_month(nov8, expiry), (datetime(2026, 11, 1).timestamp(), datetime(2026, 12, 1).timestamp(), 2))
+        self.assertEqual(credit_month(dec1, expiry)[1:], (expiry, 1))
+        week = [dict(window_minutes=10080, used_percent=99, resets_at=nov8 + 86400)]
+        def pool(now, balance, opening):
+            credits = dict(balance=balance, per_hour=400, spent_per_day=0, month_start_balance=opening)
+            return quota_routing({'codex': week}, [], now, credits, credits_expire_at=expiry)['codex']['credits']
+        # November: half of the opening 60,000 is due by 30 November; 10,000 already spent.
+        november = pool(nov8, 50000, 60000)
+        self.assertEqual((november['month_pool'], november['month_left']), (30000, 20000))
+        # Overspent November leaves nothing due this month.
+        self.assertEqual(pool(nov8, 25000, 60000)['month_left'], 0)
+        # December: whatever is left is due by 31 December, unspent November credits included.
+        december = pool(dec1, 45000, 45000)
+        self.assertEqual(december['month_left'], 45000)
+        self.assertEqual(balance_at([(nov8 - 86400, 60000), (nov8, 50000)], nov8 - 1), 60000)
+        self.assertEqual(balance_at([(nov8, 50000)], nov8 - 86400), 50000)
+        self.assertIsNone(balance_at([], nov8))
+
+    def test_credit_spend_per_day_and_expiry(self):
+        day = 86400
+        points = [(self.now - 5 * day, 1000), (self.now - 4 * day, 900), (self.now - 2 * day, 800),
+                  (self.now - 2 * day + 60, 805), (self.now - day, 650)]
+        self.assertAlmostEqual(credit_spent_per_day(points, self.now), 250 / 3)
+        # Short history still averages over at least one day.
+        self.assertAlmostEqual(credit_spent_per_day([(self.now - day / 2, 805), (self.now - day / 4, 650)], self.now), 155)
+        self.assertEqual(credit_spent_per_day(points[:2], self.now), 0)
+        self.assertEqual(credit_spent_per_day([], self.now), 0)
+        nov8 = datetime(2026, 11, 8, 9, 0).timestamp()
+        self.assertEqual(credits_expiry(nov8, 12, 31), datetime(2027, 1, 1).timestamp())
+        self.assertEqual(credits_expiry(datetime(2027, 1, 1, 0, 1).timestamp(), 12, 31), datetime(2028, 1, 1).timestamp())
+        self.assertEqual(credits_expiry(nov8, 2, 29), datetime(2028, 3, 1).timestamp())
+
     def test_history_prunes_malformed_future_and_nonfinite_rows(self):
-        path = self.home / '.claude/tools/limits-history.jsonl'
+        path = self.home / '.local/share/murmuratio/limits-history.jsonl'
         valid = self.history_point(1, 20)
         for row in (valid, self.history_point(-1, 30), self.history_point(2, True),
                     self.history_point(2, float('nan')), [], {'at': float('inf')}):
@@ -424,7 +570,7 @@ class NowTests(unittest.TestCase):
         json.dumps(routing, allow_nan=False)
 
     def test_history_only_appends_changes_and_keeps_21_days(self):
-        path = self.home / '.claude/tools/limits-history.jsonl'
+        path = self.home / '.local/share/murmuratio/limits-history.jsonl'
         self.append(path, self.history_point(22, 10))
         self.append(path, self.history_point(20, 15))
         self.source.claude_limits = lambda: [self.week(30), dict(window_minutes=300, used_percent=10, resets_at=self.now + 3600)]
@@ -445,7 +591,7 @@ class NowTests(unittest.TestCase):
         windows[0]['used_percent'] = 31
         current = self.source.state()
         self.assertEqual(len(path.read_text().splitlines()), 4)
-        target = self.home / '.claude/tools/routing.json'
+        target = self.home / '.local/share/murmuratio/routing.json'
         self.assertEqual(json.loads(target.read_text()), current['routing'])
         windows[0]['resets_at'] += 7 * 86400
         self.source.state()
@@ -568,7 +714,7 @@ class NowTests(unittest.TestCase):
         for name, ended, verdict in [('old', self.now - 86400, 'DONE'), ('a', self.now - 80, 'PARTIAL: checks'),
                                      ('b', self.now - 10, 'BLOCKED: input')]:
             self.write_run(name, status='done', ended=ended, verdict=verdict, head='a1b2c3d')
-        (self.home / '.claude/tools/codex-ledger.jsonl').write_text('{"title":"untracked old run"}\n')
+        (self.runs.parent / 'codex-ledger.jsonl').write_text('{"title":"untracked old run"}\n')
         state = self.source.state()
         self.assertFalse(state['agents'])
         self.assertEqual([a['id'] for a in state['completed']], ['codex:b', 'codex:a'])
@@ -705,16 +851,30 @@ class CreditsTest(unittest.TestCase):
 
 
 class CreditRoutingTest(unittest.TestCase):
-    def test_credits_raise_codex_headroom(self):
+    def test_credit_share_extends_codex_week(self):
         now = 1_000_000.0
         week = lambda used: [dict(window_minutes=10080, used_percent=used, resets_at=now + 2 * 86400)]
         history = [dict(at=now - 86400, tool=t, window='week', used_percent=u, resets_at=now + 2 * 86400)
                    for t, u in (('claude', 50), ('codex', 70))]
-        limits = dict(claude=week(60), codex=week(90))
-        plain = quota_routing(limits, history, now)
-        boosted = quota_routing(limits, history, now, dict(balance=4000, per_hour=400))
-        self.assertAlmostEqual(boosted['codex']['credits_percent'], 4000 / 400 * 20 / 12)
-        self.assertGreater(boosted['codex']['headroom'], plain['codex']['headroom'])
+        credits = dict(balance=4000, per_hour=400, spent_per_day=10)
+        expiry = now + 40 * 86400
+        # Claude week under pace: it leads; credits are only a budget.
+        routing = quota_routing(dict(claude=week(60), codex=week(90)), history, now, credits, credits_expire_at=expiry)
+        self.assertAlmostEqual(routing['codex']['credits_percent'], 4000 / 400 * 20 / 12)
+        self.assertEqual(routing['codex']['credits']['month_left'], 2000)
+        # This week whole, then the days after its reset to the month end, share 2,000 credits.
+        weeks = 1 + (credit_month(now, expiry)[1] - (now + 2 * 86400)) / (7 * 86400)
+        self.assertAlmostEqual(routing['codex']['credits']['weeks_left_in_month'], weeks)
+        self.assertAlmostEqual(routing['codex']['credits']['week_share_percent'], 2000 / weeks / 400 * 20 / 12)
+        self.assertEqual(routing['code_to'], 'claude')
+        # Both weeks over pace: Codex, with its credit share, has more headroom.
+        history[0]['used_percent'] = 55
+        routing = quota_routing(dict(claude=week(95), codex=week(90)), history, now, credits, credits_expire_at=expiry)
+        self.assertEqual((routing['leader'], routing['code_to']), ('codex', 'codex'))
+        # Expired credits are ignored.
+        routing = quota_routing(dict(claude=week(95), codex=week(90)), history, now, credits, credits_expire_at=now)
+        self.assertNotIn('credits', routing['codex'])
+        self.assertIn('deferred', routing['reason'])
 
 
 class BurnTest(unittest.TestCase):

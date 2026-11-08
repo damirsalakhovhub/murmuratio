@@ -106,6 +106,18 @@ class CodexBoardTests(unittest.TestCase):
         self.assertTrue(all(a['codex_role'] == 'worker' for a in state['agents']))
         self.assertFalse((self.home / '.claude').exists())
 
+    def test_desktop_threads_opened_by_an_agent_are_workers(self):
+        # A Codex Desktop chat persona starting workers: same source and originator as a
+        # person's chat, only session_meta.thread_source differs (real 0.167 metadata, sanitized).
+        for name in ('desktop_agent_created', 'desktop_agent_forked', 'desktop_user'):
+            self.rollout(name, source=None, metadata=self.launch_metadata(name))
+        self.rollout('agent-done', source=None, finished=True, metadata=self.launch_metadata('desktop_agent_created'))
+        state = self.source.state()
+        self.assertEqual({a['id'] for a in state['agents']}, {'codex:desktop_agent_created', 'codex:desktop_agent_forked'})
+        self.assertEqual([a['id'] for a in state['completed']], ['codex:agent-done'])
+        self.assertTrue(all(a['codex_role'] == 'worker' for a in state['agents'] + state['completed']))
+        self.assertEqual(state['codex_chats'], {'hidden': 1, 'running': 1})
+
     def test_board_option_shows_interactive_cards_without_saved_chat_module(self):
         self.rollout('chat', metadata=self.launch_metadata('desktop'))
         self.assertEqual(self.source.state()['agents'], [])
@@ -134,7 +146,7 @@ class CodexBoardTests(unittest.TestCase):
         self.rollout('parent-meta', finished=True, metadata={**self.launch_metadata('desktop'), 'parent_session': 'absent'})
         self.rollout('wrapped', metadata=self.launch_metadata('desktop'))
         self.source.config.modules['codex_wrapper'] = True
-        path = self.home / '.claude/tools/codex-runs/run.json'
+        path = self.home / '.local/share/murmuratio/codex-runs/run.json'
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps({'status': 'running', 'thread': 'wrapped', 'cwd': self.cwd,
                                     'started': self.now - 60, 'pid': 7}))
@@ -261,7 +273,7 @@ class CodexBoardTests(unittest.TestCase):
         self.rollout('thread', run_id='run-identifier')
         self.source.config.modules['codex_wrapper'] = True
         self.source.codex = CodexSource(self.home / '.codex', lambda value: value)
-        path = self.home / '.claude/tools/codex-runs/run-identifier.json'
+        path = self.home / '.local/share/murmuratio/codex-runs/run-identifier.json'
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps({'status': 'running', 'title': 'Wrapper title', 'thread': 'thread',
                                     'cwd': self.cwd, 'started': self.now - 60}))
@@ -274,7 +286,7 @@ class CodexBoardTests(unittest.TestCase):
 
     def test_R3_finished_wrapper_with_expired_temporary_events_is_available(self):
         self.source.config.modules['codex_wrapper'] = True
-        directory = self.home / '.claude/tools/codex-runs'
+        directory = self.home / '.local/share/murmuratio/codex-runs'
         directory.mkdir(parents=True)
         (directory / 'finished.json').write_text(json.dumps({
             'status': 'done', 'started': self.now - 60, 'ended': self.now - 10,
@@ -288,13 +300,13 @@ class CodexBoardTests(unittest.TestCase):
         for create in (False, True):
             with self.subTest(directory_exists=create):
                 if create:
-                    (self.home / '.claude/tools/codex-runs').mkdir(parents=True)
+                    (self.home / '.local/share/murmuratio/codex-runs').mkdir(parents=True)
                 state = self.source.state()
                 self.assertEqual(state['sources']['codex_wrapper']['status'], 'absent')
 
     def test_R3_wrapper_permission_failure_has_a_private_safe_reason(self):
         self.source.config.modules['codex_wrapper'] = True
-        directory = self.home / '.claude/tools/codex-runs'
+        directory = self.home / '.local/share/murmuratio/codex-runs'
         directory.mkdir(parents=True)
         events = self.home / 'events.jsonl'
         events.write_text('{}\n')
@@ -314,7 +326,7 @@ class CodexBoardTests(unittest.TestCase):
 
     def test_R3_unreadable_empty_wrapper_directory_is_a_problem(self):
         self.source.config.modules['codex_wrapper'] = True
-        (self.home / '.claude/tools/codex-runs').mkdir(parents=True)
+        (self.home / '.local/share/murmuratio/codex-runs').mkdir(parents=True)
         with patch('os.scandir', side_effect=PermissionError(errno.EACCES, 'synthetic denial')):
             state = self.source.state()
         self.assertEqual(state['sources']['codex_wrapper'], {
@@ -323,7 +335,7 @@ class CodexBoardTests(unittest.TestCase):
     def test_run_id_deduplicates_when_wrapper_has_no_thread(self):
         self.rollout('thread', run_id='run-identifier')
         self.source.config.modules['codex_wrapper'] = True
-        path = self.home / '.claude/tools/codex-runs/run-identifier.json'
+        path = self.home / '.local/share/murmuratio/codex-runs/run-identifier.json'
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps({'status': 'running', 'title': 'Wrapper title', 'cwd': self.cwd,
                                     'started': self.now - 60, 'pid': 7}))
@@ -334,7 +346,7 @@ class CodexBoardTests(unittest.TestCase):
     def test_missing_wrapper_pid_uses_completed_turn_status(self):
         self.rollout('finished-thread', finished=True)
         self.source.config.modules['codex_wrapper'] = True
-        path = self.home / '.claude/tools/codex-runs/run.json'
+        path = self.home / '.local/share/murmuratio/codex-runs/run.json'
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps({'status': 'running', 'thread': 'finished-thread', 'cwd': self.cwd,
                                     'started': self.now - 60}))
@@ -344,7 +356,7 @@ class CodexBoardTests(unittest.TestCase):
     def test_completed_wrapper_without_pid_survives_incomplete_rollout(self):
         self.rollout('finished-thread')
         self.source.config.modules['codex_wrapper'] = True
-        path = self.home / '.claude/tools/codex-runs/run.json'
+        path = self.home / '.local/share/murmuratio/codex-runs/run.json'
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps({'status': 'done', 'thread': 'finished-thread', 'cwd': self.cwd,
                                     'started': self.now - 60, 'ended': self.now - 10}))
@@ -354,7 +366,7 @@ class CodexBoardTests(unittest.TestCase):
     def test_invalid_wrapper_thread_does_not_hide_other_sessions(self):
         self.rollout('healthy')
         self.source.config.modules['codex_wrapper'] = True
-        path = self.home / '.claude/tools/codex-runs/bad.json'
+        path = self.home / '.local/share/murmuratio/codex-runs/bad.json'
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps({'status': 'running', 'thread': {'unexpected': True},
                                     'cwd': self.cwd, 'started': self.now - 60}))
@@ -371,7 +383,7 @@ class CodexBoardTests(unittest.TestCase):
             {'type': 'response_item', 'timestamp': self.now - 57, 'payload': {'type': 'message', 'role': 'user',
                 'content': [{'type': 'input_text', 'text': 'New independent task'}]}}])
         self.source.config.modules['codex_wrapper'] = True
-        run = self.home / '.claude/tools/codex-runs/old-run.json'
+        run = self.home / '.local/share/murmuratio/codex-runs/old-run.json'
         run.parent.mkdir(parents=True)
         run.write_text(json.dumps({'status': 'done', 'thread': 'resumed-wrapper', 'title': 'Old task',
             'model': 'old-model', 'cwd': self.cwd, 'parent_session': 'old',
@@ -385,7 +397,7 @@ class CodexBoardTests(unittest.TestCase):
     def test_done_wrapper_verdict_wins_over_unfinished_rollout_with_or_without_pid(self):
         self.rollout('unfinished', started=self.now - 3600)
         self.source.config.modules['codex_wrapper'] = True
-        path = self.home / '.claude/tools/codex-runs/run.json'
+        path = self.home / '.local/share/murmuratio/codex-runs/run.json'
         path.parent.mkdir(parents=True)
         for verdict, expected in [('CRASHED: wrapper exited', 'crashed'), ('DONE', 'done'),
                                   ('', 'done'), ('BLOCKED: missing input', 'done')]:
@@ -405,7 +417,7 @@ class CodexBoardTests(unittest.TestCase):
     def test_done_wrapper_without_end_time_is_completed(self):
         self.rollout('unfinished')
         self.source.config.modules['codex_wrapper'] = True
-        path = self.home / '.claude/tools/codex-runs/run.json'
+        path = self.home / '.local/share/murmuratio/codex-runs/run.json'
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps({'status': 'done', 'thread': 'unfinished',
                                     'started': self.now - 60, 'verdict': 'CRASHED: wrapper exited'}))
@@ -419,7 +431,7 @@ class CodexBoardTests(unittest.TestCase):
         self.now = time.mktime((2026, 11, 7, 12, 0, 0, 0, 0, -1))
         self.rollout('unfinished', started=self.now - 20 * 3600)
         self.source.config.modules['codex_wrapper'] = True
-        path = self.home / '.claude/tools/codex-runs/run.json'
+        path = self.home / '.local/share/murmuratio/codex-runs/run.json'
         path.parent.mkdir(parents=True)
         events = self.home / 'events.jsonl'
         self.write(events, [{'type': 'thread.started', 'thread_id': 'unfinished'}])
@@ -467,7 +479,7 @@ class CodexBoardTests(unittest.TestCase):
 
     def test_B2_run_id_does_not_match_a_different_thread_namespace(self):
         self.source.config.modules['codex_wrapper'] = True
-        directory = self.home / '.claude/tools/codex-runs'
+        directory = self.home / '.local/share/murmuratio/codex-runs'
         directory.mkdir(parents=True)
         for name, thread in [('collision', 'thread-one'), ('run-two', 'collision')]:
             (directory / (name + '.json')).write_text(json.dumps({
@@ -479,7 +491,7 @@ class CodexBoardTests(unittest.TestCase):
         midnight = time.mktime((2026, 11, 7, 0, 0, 0, 0, 0, -1))
         self.now = midnight + 60
         self.source.config.modules['codex_wrapper'] = True
-        directory = self.home / '.claude/tools/codex-runs'
+        directory = self.home / '.local/share/murmuratio/codex-runs'
         directory.mkdir(parents=True)
         (directory / 'before-midnight.json').write_text(json.dumps({
             'status': 'done', 'started': midnight - 600, 'ended': midnight - 300}))
@@ -499,7 +511,7 @@ class CodexBoardTests(unittest.TestCase):
     def test_live_wrapper_pid_keeps_inactive_rollout_active(self):
         self.rollout('alive', started=self.now - 1900)
         self.source.config.modules['codex_wrapper'] = True
-        path = self.home / '.claude/tools/codex-runs/run.json'
+        path = self.home / '.local/share/murmuratio/codex-runs/run.json'
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps({'status': 'running', 'thread': 'alive', 'pid': 7,
                                     'cwd': self.cwd, 'started': self.now - 1900}))
@@ -512,7 +524,7 @@ class CodexBoardTests(unittest.TestCase):
     def test_live_rollout_keeps_card_active_after_wrapper_process_exits(self):
         rollout = self.rollout('alive', started=self.now - 1900)
         self.source.config.modules['codex_wrapper'] = True
-        path = self.home / '.claude/tools/codex-runs/run.json'
+        path = self.home / '.local/share/murmuratio/codex-runs/run.json'
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps({'status': 'running', 'thread': 'alive', 'pid': 8,
                                     'cwd': self.cwd, 'started': self.now - 1900}))
@@ -532,7 +544,7 @@ class CodexBoardTests(unittest.TestCase):
         rollout.write_text(rollout.read_text().splitlines()[0] + '\n')
         os.utime(rollout, (self.now - 1900, self.now - 1900))
         self.source.config.modules['codex_wrapper'] = True
-        path = self.home / '.claude/tools/codex-runs/run.json'
+        path = self.home / '.local/share/murmuratio/codex-runs/run.json'
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps({'status': 'running', 'thread': 'incomplete',
                                     'cwd': self.cwd, 'started': self.now - 1901}))
@@ -573,14 +585,40 @@ class CodexBoardTests(unittest.TestCase):
             self.assertEqual(state['completed'][0]['status'], 'crashed')
 
     @unittest.skipUnless(Path('/usr/sbin/lsof').is_file(), 'macOS lsof is required')
-    def test_B1_live_writer_outside_discovery_window_reappears_after_append(self):
-        path = self.rollout('quiet-live', started=self.now - 86410)
-        os.utime(path, (self.now - 86401, self.now - 86401))
+    def test_B1_live_writer_stays_on_the_board_however_long_it_is_quiet(self):
+        # Three days quiet, still open for writing: an unfinished worker never leaves the board.
+        path = self.rollout('quiet-live', started=self.now - 3 * 86400 - 10)
+        os.utime(path, (self.now - 3 * 86400, self.now - 3 * 86400))
         with path.open('a'):
             self.assertEqual(rollout_writers([path]), {path})
-            self.assertNotIn('codex:quiet-live', self.agents())
+            self.assertEqual(self.agents()['codex:quiet-live']['status'], 'hung')
             self.write(path, [self.event('token_count', self.now - 1)])
             self.assertEqual(self.agents()['codex:quiet-live']['status'], 'working')
+
+    def test_old_rollouts_are_checked_cheaply_and_only_open_workers_stay(self):
+        day = 86400
+        open_worker = self.rollout('open-worker', started=self.now - 3 * day - 10)
+        finished = self.rollout('finished-worker', started=self.now - 3 * day - 10, finished=True)
+        chat = self.rollout('old-chat', source='vscode', started=self.now - 3 * day - 10)
+        for path in (open_worker, finished, chat):
+            os.utime(path, (self.now - 3 * day, self.now - 3 * day))
+        writers = {open_worker, finished, chat}
+        with patch('murmuratio_app.adapters.codex_board.rollout_writers', return_value=writers) as probe:
+            agents = self.agents()
+            self.assertEqual(set(agents), {'codex:open-worker'})
+            self.assertEqual(agents['codex:open-worker']['status'], 'hung')
+            self.assertEqual([call.args[0] for call in probe.call_args_list], [[open_worker]])
+        adapter = self.source.codex_board_adapter
+        self.assertEqual({path.name: value[1] for path, value in adapter.old.items()},
+                         {open_worker.name: True, finished.name: False, chat.name: False})
+        # A crashed verdict is kept until the file changes: no writer check on later polls.
+        with patch('murmuratio_app.adapters.codex_board.rollout_writers', return_value=set()):
+            self.assertNotIn('codex:open-worker', self.agents())
+        with patch('murmuratio_app.adapters.codex_board.rollout_writers', side_effect=AssertionError('probed')):
+            self.assertNotIn('codex:open-worker', self.agents())
+            self.assertNotIn('codex:open-worker', self.agents())
+        with patch('murmuratio_app.adapters.codex_board.open_worker', side_effect=AssertionError('reread')):
+            self.agents()
 
     def test_claude_subagent_bash_result_links_to_owning_session(self):
         self.claude()
@@ -636,7 +674,7 @@ class CodexBoardTests(unittest.TestCase):
         self.write(events, [self.event('token_count', self.now - 3, info={
             'last_token_usage': {'input_tokens': 42000}})])
         self.source.config.modules['codex_wrapper'] = True
-        run = self.home / '.claude/tools/codex-runs/context-run.json'
+        run = self.home / '.local/share/murmuratio/codex-runs/context-run.json'
         run.parent.mkdir(parents=True)
         run.write_text(json.dumps({'status': 'running', 'thread': 'context-thread', 'events': str(events),
                                    'cwd': self.cwd, 'pid': 7, 'started': self.now - 60}))
@@ -644,7 +682,7 @@ class CodexBoardTests(unittest.TestCase):
         self.assertEqual((agent['context_used'], agent['context_window']), (42000, 200000))
 
     def test_recent_window_and_large_rollout_head_tail(self):
-        old = self.rollout('old')
+        old = self.rollout('old', finished=True)  # finished over a day ago: left the board
         os.utime(old, (self.now - 90000, self.now - 90000))
         path = self.rollout('large', finished=True)
         self.write(path, [{'type': 'response_item', 'timestamp': self.now - 30, 'payload': {

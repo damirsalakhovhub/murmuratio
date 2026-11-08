@@ -30,12 +30,7 @@ def cache_limits(raw):
         if not selected:
             return
         directory = Path.home() / '.local/share/murmuratio'
-        legacy = Path.home() / '.local/share/agent-inspector'
-        if not directory.exists() and legacy.is_dir():
-            # Do not recreate the old directory if a concurrent run moves it.
-            directory = legacy
-        else:
-            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         name = None
         try:
             with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=directory, delete=False) as stream:

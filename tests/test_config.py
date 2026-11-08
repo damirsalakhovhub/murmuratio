@@ -81,10 +81,33 @@ after_inherit = true
     def test_invalid_values_fail_instead_of_silently_enabling_modules(self):
         for value in ('[modules]\nrouting = "yes"\n', '[work_hours]\nstart = 21\nend = 9\n',
                       '[projects]\norder = "project"\n', '[board]\nshow_codex_chats = "yes"\n',
-                      'board = true\n'):
+                      'board = true\n', '[routing]\ncredits_expire = "13-01"\n',
+                      '[routing]\ncredits_expire = 1231\n', 'routing = 1\n',
+                      '[limits]\ncodex_live = "yes"\n', '[paths]\ncodex_cli = ""\n'):
             self.path.write_text(value)
             with self.subTest(value=value), self.assertRaises(ValueError):
                 Config.load(self.home, self.path)
+
+    def test_live_codex_limits_are_off_by_default(self):
+        config = Config.load(self.home, self.path)
+        self.assertEqual((config.codex_live_limits, config.codex_cli), (False, None))
+        self.path.write_text('[limits]\ncodex_live = true\n[paths]\ncodex_cli = "~/bin/codex"\n')
+        config = Config.load(self.home, self.path)
+        self.assertEqual((config.codex_live_limits, config.codex_cli), (True, self.home / 'bin/codex'))
+
+    def test_default_paths_stay_in_the_data_folder(self):
+        config = Config.load(self.home, self.path)
+        data = self.home / '.local/share/murmuratio'
+        self.assertEqual((config.wrapper_runs, config.routing_file, config.limits_history),
+                         (data / 'codex-runs', data / 'routing.json', data / 'limits-history.jsonl'))
+        self.assertIsNone(config.claude_limits_extra)
+        self.path.write_text('[paths]\nclaude_limits = "~/old/claude-limits.json"\n')
+        self.assertEqual(Config.load(self.home, self.path).claude_limits_extra, self.home / 'old/claude-limits.json')
+
+    def test_credit_expiry_defaults_to_december_31(self):
+        self.assertEqual(Config.load(self.home, self.path).credits_expire, (12, 31))
+        self.path.write_text('[routing]\ncredits_expire = "03-15"\n')
+        self.assertEqual(Config.load(self.home, self.path).credits_expire, (3, 15))
 
     def test_routing_credit_capacity_uses_configured_workday(self):
         now = 1_000_000
@@ -135,7 +158,7 @@ class ModuleTests(unittest.TestCase):
             started.set()
             release.wait(5)
             finished.set()
-            return 'available', ({'balance': 80}, [])
+            return 'available', ({'balance': 80}, [], [])
         self.addCleanup(release.set)
         with patch.object(self.source, '_collect_codex_usage', side_effect=slow_scan):
             before = time.monotonic()
@@ -156,6 +179,32 @@ class ModuleTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertEqual(state['credits'], {'balance': 80})
             self.assertEqual(len(calls), 1)
+
+    def test_routing_file_waits_for_the_cold_credit_scan_and_live_read(self):
+        # Right after a restart the credit scan had not finished, so routing.json was written with no
+        # credit rate (Codex looked exhausted) and a stale Codex sample.
+        self.config.modules.update(routing=True, codex_credits=True)
+        self.config.codex_live_limits = True
+        release = threading.Event()
+        self.addCleanup(release.set)
+        def slow_scan(*args):
+            release.wait(5)
+            return 'available', ({'balance': 80, 'per_hour': 10}, [], [])
+        def live():
+            release.wait(5)
+            return 'available', (self.now, [self.week], 80)
+        target = self.config.routing_file
+        with patch.object(self.source, '_collect_codex_usage', side_effect=slow_scan), \
+                patch.object(self.source, '_collect_codex_live', side_effect=live):
+            state = self.source.state()
+            self.assertIsNotNone(state['routing'])
+            self.assertFalse(target.exists(), 'partial routing is not written')
+            release.set()
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and not target.exists():
+                self.source.state()
+                time.sleep(0.01)
+        self.assertEqual(json.loads(target.read_text())['codex']['used_percent'], 45)
 
     def test_concurrent_requests_share_the_first_completed_snapshot(self):
         started, second_started, release = threading.Event(), threading.Event(), threading.Event()
@@ -307,7 +356,7 @@ class EndpointTests(unittest.TestCase):
         connection = http.client.HTTPConnection('127.0.0.1', self.http.server_port)
         origin = f'http://127.0.0.1:{self.http.server_port}'
         connection.request('POST', '/api/codex/reset/prepare', body='{}', headers={
-            'Origin': origin, 'Content-Type': 'application/json', 'X-Inspector-Action': '1'})
+            'Origin': origin, 'Content-Type': 'application/json', 'X-Murmuratio-Action': '1'})
         response = connection.getresponse()
         self.assertEqual(response.status, 400)
         response.read()

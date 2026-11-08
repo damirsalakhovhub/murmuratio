@@ -32,8 +32,11 @@ def sanitize(value):
 
 
 def make_handler(codex=None, public_url=None, reset=None, now=None, config=None):
+    from murmuratio_app.config import Config
+    config = config or Config()  # without a config every optional module is off
+
     class Handler(BaseHTTPRequestHandler):
-        server_version = 'LocalInspector'
+        server_version = 'Murmuratio'
 
         def log_message(self, *args):
             pass  # Do not log URL, IDs, exceptions or request content.
@@ -73,7 +76,7 @@ def make_handler(codex=None, public_url=None, reset=None, now=None, config=None)
                                and self.headers.get('Sec-Fetch-Dest') == 'document')
             ok = ok and (page_navigation or self.headers.get('Sec-Fetch-Site', 'same-origin') not in ('cross-site', 'same-site'))
             if write:
-                ok = ok and self.headers.get('X-Inspector-Action') == '1' and self.headers.get('Content-Type', '').split(';')[0] == 'application/json'
+                ok = ok and self.headers.get('X-Murmuratio-Action') == '1' and self.headers.get('Content-Type', '').split(';')[0] == 'application/json'
             if not ok:
                 self.send_data(403, {'error': 'Only local same-origin access is allowed'})
             return ok
@@ -84,19 +87,16 @@ def make_handler(codex=None, public_url=None, reset=None, now=None, config=None)
             parsed = urlsplit(self.path)
             try:
                 if parsed.path == '/api/config':
-                    self.send_data(200, config.frontend() if config else {
-                        'modules': {'codex_chats': bool(codex), 'context_reset': bool(reset),
-                                    'forecast': True, 'scenarios': True, 'burn_rate': True, 'branding': True},
-                        'project_order': [], 'work_hours': [9, 21]})
+                    self.send_data(200, config.frontend())
                 elif parsed.path == '/api/now' and now:
                     self.send_data(200, now.state())
-                elif parsed.path == '/api/codex/reset/status' and reset and (config is None or config.modules['codex_chats'] and config.modules['context_reset']):
+                elif parsed.path == '/api/codex/reset/status' and reset and (config.modules['codex_chats'] and config.modules['context_reset']):
                     self.send_data(200, reset.status(parse_qs(parsed.query).get('id', [''])[0]))
-                elif parsed.path in ('/api/codex/state', '/api/codex/session', '/api/codex/event') and codex and (config is None or config.modules['codex_chats']):
+                elif parsed.path in ('/api/codex/state', '/api/codex/session', '/api/codex/event') and codex and config.modules['codex_chats']:
                     query = parse_qs(parsed.query)
                     if parsed.path.endswith('/state'):
                         state = codex.state()
-                        titles = now.codex_titles() if now is not None and hasattr(now, 'codex_titles') and (config is None or config.modules['codex_wrapper']) else {}
+                        titles = now.codex_titles() if now is not None and hasattr(now, 'codex_titles') and config.modules['codex_wrapper'] else {}
                         for session in state.get('sessions') or []:
                             if isinstance(session, dict) and titles.get(session.get('id')):
                                 session['task'] = titles[session['id']]
@@ -122,7 +122,7 @@ def make_handler(codex=None, public_url=None, reset=None, now=None, config=None)
                     ct = 'text/javascript; charset=utf-8' if name.endswith('.js') else {'index.html': 'text/html; charset=utf-8', 'style.css': 'text/css; charset=utf-8'}[name]
                     body = (ROOT / 'web' / name).read_bytes()
                     if name == 'index.html':
-                        branding = (ROOT / 'web' / 'branding.html').read_bytes() if config is None or config.modules['branding'] else b''
+                        branding = (ROOT / 'web' / 'branding.html').read_bytes() if config.modules['branding'] else b''
                         body = body.replace(b'  <!-- murmuratio-branding -->', branding.rstrip(b'\n'))
                     self.send_data(200, body, ct)
                 else:
@@ -150,16 +150,16 @@ def make_handler(codex=None, public_url=None, reset=None, now=None, config=None)
             if not self.allowed(write=True):
                 return
             if self.path.startswith('/api/codex/reset/') and self.headers.get('Origin') != 'http://' + str(self.headers.get('Host')):
-                self.send_data(403, {'error': 'Reset requires a local inspector page.'})
+                self.send_data(403, {'error': 'Reset requires a local Murmuratio page.'})
                 return
             try:
                 n = int(self.headers.get('Content-Length', '0'))
                 if n < 0 or n > 512:
                     raise ValueError()
                 data = json.loads(self.rfile.read(n))
-                if self.path == '/api/codex/reset/prepare' and reset and (config is None or config.modules['codex_chats'] and config.modules['context_reset']):
+                if self.path == '/api/codex/reset/prepare' and reset and (config.modules['codex_chats'] and config.modules['context_reset']):
                     self.send_data(200, reset.prepare(data.get('id')))
-                elif self.path == '/api/codex/reset/start' and reset and (config is None or config.modules['codex_chats'] and config.modules['context_reset']):
+                elif self.path == '/api/codex/reset/start' and reset and (config.modules['codex_chats'] and config.modules['context_reset']):
                     self.send_data(202, reset.start(data.get('id'), data.get('token')))
                 else:
                     self.send_data(400, {'error': 'Unknown operation'})
@@ -175,7 +175,7 @@ def make_handler(codex=None, public_url=None, reset=None, now=None, config=None)
 def main(argv=None):
     parser = PlainArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=int(os.environ.get('PORT', '8765')))
-    parser.add_argument('--data-dir', type=Path, default=ROOT / '.inspector-data')
+    parser.add_argument('--data-dir', type=Path, help='Default: ~/.local/share/murmuratio')
     parser.add_argument('--codex-home', type=Path)
     parser.add_argument('--config', type=Path, help='Optional TOML config file')
     parser.add_argument('--demo', action='store_true', help='Serve deterministic fixtures without reading personal data')
@@ -202,7 +202,7 @@ def main(argv=None):
         if config.modules['codex_chats']:
             codex = CodexSource(codex_home, sanitize, include_reset=config.modules['context_reset'])
             if config.modules['context_reset']:
-                reset = ResetController(codex, args.data_dir)
+                reset = ResetController(codex, args.data_dir or home / '.local/share/murmuratio')
         now = NowSource(home=home, sanitize=sanitize, codex=codex, config=config, codex_home=codex_home)
     public_url = os.environ.get('PORTLESS_URL')
     server = ThreadingHTTPServer(('127.0.0.1', args.port), make_handler(codex, public_url, reset, now, config))
