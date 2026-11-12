@@ -6,7 +6,7 @@ From the repository root, run the standard-library Python tests:
 python3 -B -m unittest discover -s tests -v
 ```
 
-The browser tests use Node.js 18 or newer, `puppeteer-core` and an existing Chrome or Chromium installation. They use isolated fixture data. No browser is downloaded by the test dependency.
+The browser tests use Node.js 22.12 or newer, `puppeteer-core` and an existing Chrome or Chromium installation. They use isolated fixture data. No browser is downloaded by the test dependency.
 
 ```sh
 npm ci --prefix tests
@@ -30,10 +30,6 @@ uninstallation in temporary homes. It checks preservation of existing and
 edited Claude settings, a later Claude-only install, occupied port and invalid
 config errors. On macOS, LaunchAgent commands use a stub, never the real
 `launchctl`. Check any changed optional modules separately before release.
-
-On 2026-11-07, `npm audit` reported nine high findings in the browser test
-dependencies. The latest Puppeteer 24 release still has them; npm reports that
-the full fix requires a major upgrade to Puppeteer 25. Recheck before release.
 
 The browser suite also runs `npm run test:scale --prefix tests`, which generates
 1,000 old and 200 recent sessions and checks the API, cards and live refresh.

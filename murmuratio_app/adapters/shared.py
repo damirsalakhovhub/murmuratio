@@ -5,11 +5,15 @@ from pathlib import Path
 import re
 from murmuratio_app.common import one_line, timestamp
 
+MAX_RECORD_BYTES = 8 * 1024 * 1024
+
 CODEX_DEAD_SECONDS = 30 * 60
 CLAUDE_TURN_FINISHED = frozenset(('end_turn', 'stop_sequence'))
 
 
 def codex_status(run, now, last_event, alive):
+    if run.get('status') == 'blocked':
+        return 'blocked'
     if run.get('status') == 'done':
         return 'crashed' if one_line(run.get('verdict')).startswith('CRASHED') else 'done'
     if alive is False:
@@ -139,6 +143,18 @@ class JsonlSummary:
         self.data = {}
         self.malformed = 0
         self.record_types = set()
+        self.readable_types = set()
+
+    def unreadable(self, known_types=None):
+        """A rejected record is local; only a wholly unreadable stream is unsupported.
+
+        Consumers with a known format must see at least one successfully consumed
+        record of that format. Empty files and partial appends are still readable.
+        """
+        readable = self.readable_types
+        if known_types is not None:
+            readable = readable.intersection(known_types)
+        return bool(self.malformed or self.record_types) and not readable
 
     def refresh(self, path, consume):
         st = path.stat()
@@ -154,42 +170,86 @@ class JsonlSummary:
                 self.data = {}
                 self.malformed = 0
                 self.record_types = set()
+                self.readable_types = set()
                 self.prefix.reset()
             self.inode, self.modified, self.size = st.st_ino, st.st_mtime_ns, st.st_size
             stream.seek(self.offset)
-            while True:
-                line = stream.readline()
-                if not line or not line.endswith(b'\n'):
-                    break
-                self.offset = stream.tell()
-                try:
-                    record = json.loads(line)
-                except (ValueError, UnicodeDecodeError):
-                    self.malformed += 1
-                    continue
-                if isinstance(record, dict):
-                    kind = record.get('type')
-                    if kind is None or isinstance(kind, str):
-                        self.record_types.add(kind)
-                    else:
-                        self.malformed += 1
-                    try:
-                        consume(self.data, record)
-                    except (ValueError, TypeError, AttributeError, OverflowError):
-                        self.malformed += 1
-                else:
-                    self.malformed += 1
+            self._read_records(stream, consume)
             self.prefix.extend(stream, self.offset)
         return self.data, st.st_mtime
+
+    def refresh_tail(self, path, consume, limit):
+        """Read a bounded tail, dropping its leading fragment and partial final record."""
+        with path.open('rb') as stream:
+            size = stream.seek(0, 2)
+            start = max(0, size - limit)
+            stream.seek(max(0, start - 1))
+            if start:
+                # Starting on a boundary keeps the next record; starting inside a
+                # large record discards only its suffix, never reports it as JSON.
+                stream.readline(limit + 1)
+            self._read_records(stream, consume)
+        return self.data
+
+    def _reject(self):
+        self.malformed += 1
+        # The discarded record may contain a compaction or a usage measurement.
+        self.data.update(context_tokens=None, _context_invalidated=True)
+
+    def _read_records(self, stream, consume):
+        while True:
+            line = stream.readline(MAX_RECORD_BYTES + 1)
+            if len(line) > MAX_RECORD_BYTES:
+                while line and not line.endswith(b'\n'):
+                    line = stream.readline(65536)
+                if not line:
+                    break
+                self.offset = stream.tell()
+                self._reject()
+                continue
+            if not line or not line.endswith(b'\n'):
+                break
+            self.offset = stream.tell()
+            try:
+                record = json.loads(line)
+            except (ValueError, UnicodeDecodeError, RecursionError):
+                self._reject()
+                continue
+            if isinstance(record, dict):
+                kind = record.get('type')
+                if kind is None or isinstance(kind, str):
+                    self.record_types.add(kind)
+                else:
+                    self._reject()
+                    continue
+                try:
+                    consume(self.data, record)
+                except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
+                    self._reject()
+                else:
+                    self.readable_types.add(kind)
+            else:
+                self._reject()
 
 
 def context_number(value, positive=False):
     return isinstance(value, int) and not isinstance(value, bool) and value >= (1 if positive else 0)
 
 
-def claude_context_window(data, model):
+def model_context_window(data, model):
     if context_number(data.get('context_window'), positive=True):
         return data['context_window']
-    if claude_label(model) in ('Claude Opus 5.5', 'Claude Sonnet 5.5'):
-        return 1000000
+    model = model.lower() if isinstance(model, str) else ''
+    match = re.match(r'^claude-(opus|sonnet|haiku|fable|mythos)(?:-([0-9]+)(?:[-.]([0-9]+))?)?(?:-|$)', model)
+    if match:
+        family, major, minor = match.groups()
+        version = (int(major), int(minor or 0)) if major else None
+        minimum = {'opus': (4, 6), 'sonnet': (4, 6), 'haiku': (5, 5)}.get(family, (5, 0))
+        # Missing/new versions use the family's current size; older Claude uses 200k.
+        # Codex fallbacks are usable input windows (95% of CLI metadata), not API maxima.
+        return 1000000 if version is None or version >= minimum else 200000
+    if re.match(r'^gpt-6[.]1(?:-|$)', model):
+        return 475000
+    if re.match(r'^gpt-[0-9]+(?:[.][0-9]+)?(?:-|$)|^codex(?:-|$)', model):
+        return 258400
     return None

@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 LABEL = 'org.murmuratio.app'
 DEFAULT_CONFIG = ('# Optional modules are disabled by default.\n[modules]\n' +
                   ''.join(f'{name} = false\n' for name in MODULES) +
-                  '\n[board]\nshow_codex_chats = false\n').encode()
+                  '\n').encode()
 
 
 class InstallError(Exception):
@@ -247,6 +247,7 @@ def read_plan(paths, config, demo=False, config_path=None):
     found = Discovery.at(paths.home, config)
     for path in (config_path or paths.config, found.claude_limits, found.claude_limits_legacy,
                  found.claude_sessions / '*/*.jsonl', found.claude_sessions / '*/*/subagents/*.jsonl',
+                 found.claude_sessions / '*/*/subagents/*.meta.json', found.agents_registry,
                  found.claude_desktop / '*/*/local_*.json',
                  found.codex_rollouts / '*/*/*/rollout-*.jsonl'):
         if path is not None:
@@ -254,19 +255,15 @@ def read_plan(paths, config, demo=False, config_path=None):
     if config.modules['codex_wrapper']:
         print(f'  {found.codex_wrapper}/*.json')
         print('  Event paths referenced by those wrapper files')
-    if config.modules['codex_chats']:
-        for path in (found.codex_home / 'state_5.sqlite', found.codex_home / '.codex-global-state.json',
-                     found.codex_home / 'sessions', found.codex_home / 'archived_sessions'):
-            print(f'  {path}')
-        print(f'  {found.codex_home}/state_5.sqlite-wal and state_5.sqlite-shm (when present)')
-        print('  Rollout paths referenced by the Codex database')
-    if config.modules['forecast'] or config.modules['routing']:
+        print('  Brief paths referenced by those wrapper files')
+    for path in (found.codex_home / 'session_index.jsonl', found.codex_home / 'state_5.sqlite'):
+        print(f'  {path}')
+    print(f'  {found.codex_home}/state_5.sqlite-wal and state_5.sqlite-shm (when present)')
+    print('  Rollout paths referenced by the Codex database (sessions/ or archived_sessions/)')
+    if config.modules['forecast'] or config.modules['routing'] or config.modules['burn_rate']:
         print(f'  {config.limits_history}')
-    if config.modules['context_reset'] and config.modules['codex_chats']:
-        print(f'  {paths.data}/reset/reset-results.json (or legacy {paths.data}/reset-results.json)')
-        print(f'  {found.codex_home}/goals_1.sqlite (on context reset)')
-        print(f'  {found.codex_home}/config.toml and the bundled Codex executable (on context reset)')
-        print('  The Codex process may read additional paths it controls.')
+    if config.modules['routing']:
+        print(f'  {config.limits_history.parent / "routing-history.jsonl"}')
     if config.codex_live_limits:
         print(f'  {config.codex_cli or "codex on PATH"} app-server, every 5 minutes (account/rateLimits/read;'
               ' Codex contacts OpenAI and reads paths it controls)')
@@ -280,11 +277,11 @@ def write_plan(paths, config, demo=False):
         return
     if config.modules['forecast'] or config.modules['routing']:
         print(f'  {config.limits_history} (quota history)')
+        print(f'  {config.limits_history.with_suffix(config.limits_history.suffix + ".tmp")} (atomic replacement)')
     if config.modules['routing']:
         print(f'  {config.routing_file} (routing)')
-    if config.modules['context_reset'] and config.modules['codex_chats']:
-        print(f'  {paths.data}/reset/reset-results.json (on context reset)')
-        print('  A context reset also runs Codex, which may update its own data.')
+        print(f'  {config.routing_file.with_suffix(config.routing_file.suffix + ".tmp")} (atomic replacement)')
+        print(f'  {config.limits_history.parent / "routing-history.jsonl"} (changed routing advice)')
     print(f'  {paths.data}/claude-limits.json (when the installed statusLine receives limits)')
     print('  The previous statusLine command may write its own files.')
 
@@ -472,6 +469,10 @@ def install(paths, args):
 def remove_installation_files(paths):
     """Keep the recovery record until all other cleanup has succeeded."""
     state = load_state(paths)
+    # The status line's limits cache is only a copy of what Claude reports.
+    cache = paths.data / 'claude-limits.json'
+    if cache.is_file() and not cache.is_symlink():
+        cache.unlink()
     identity = state.get('created_config_identity')
     if state['created_config'] and identity:
         if sole_owned_file(paths.config, identity) and paths.config.read_bytes() == DEFAULT_CONFIG:
@@ -481,10 +482,6 @@ def remove_installation_files(paths):
             sha(paths.backup.read_bytes()) == state.get('backup_sha')):
         paths.backup.unlink()
     paths.state.unlink()
-    # The status line's limits cache is only a copy of what Claude reports.
-    cache = paths.data / 'claude-limits.json'
-    if cache.is_file() and not cache.is_symlink():
-        cache.unlink()
     created = [paths.home / name for name in state.get('created_dirs', [])
                if isinstance(name, str) and name and not Path(name).is_absolute() and '..' not in Path(name).parts]
     for directory in (paths.install, paths.install.parent, paths.config_dir,
@@ -578,6 +575,7 @@ def uninstall(paths, args):
             print(f'  restore or remove: {paths.settings}')
         print(f'  remove owned installation records: {paths.install}')
         print(f'  remove unchanged installer-created config: {paths.config}')
+        print(f'  remove statusLine limits cache: {paths.data / "claude-limits.json"}')
         if agent:
             print(f'  unload and remove: {agent}')
         read_plan(paths, Config.load(paths.home))
@@ -608,7 +606,6 @@ def uninstall(paths, args):
 
 def doctor(paths):
     from murmuratio_app.now import NowSource
-    from murmuratio_app.adapters.codex_sessions import CodexSource
     config = Config.load(paths.home)
     source = NowSource(home=paths.home, config=config)
     found = source.discovery
@@ -623,8 +620,6 @@ def doctor(paths):
                source.claude_limits_adapter.read(), source.codex_limits_adapter.read()]
     if config.modules['codex_wrapper']:
         results.append(source.wrapper_adapter.read(now, set()))
-    if config.modules['codex_chats']:
-        results.append(CodexSource(found.codex_home, lambda value: value).read())
     if config.modules['burn_rate'] or config.modules['scenarios'] and config.modules['forecast']:
         results.append(source.claude_usage_adapter.read(now - 7 * 86400, desktop_by_id, config.modules['burn_rate']))
     if config.modules['burn_rate'] or config.modules['codex_credits']:
@@ -699,7 +694,7 @@ def main(argv=None):
             else:
                 os.environ.pop('PORTLESS_URL', None)
             from murmuratio_app.server import main as serve
-            command = ['--port', str(args.port), '--data-dir', str(paths.data)]
+            command = ['--port', str(args.port)]
             if args.config:
                 command.extend(['--config', str(args.config)])
             if args.demo:

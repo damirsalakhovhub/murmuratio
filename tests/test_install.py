@@ -286,6 +286,7 @@ class InstallTests(unittest.TestCase):
         result = self.cli('install', '--dry-run')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.tree(), before)
+
         for path in (self.paths.settings, self.paths.backup, self.paths.state, self.paths.config,
                      self.paths.data / 'claude-limits.json',
                      self.home / '.claude/projects', self.home / '.codex/sessions'):
@@ -297,6 +298,53 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(self.cli('doctor', '--dry-run').returncode, 0)
         self.assertEqual(self.cli('run', '--dry-run').returncode, 0)
         self.assertEqual(self.tree(), before)
+
+    def test_dry_run_inventory_includes_registry_metadata_and_routing_history(self):
+        self.paths.config.parent.mkdir(parents=True, exist_ok=True)
+        self.paths.config.write_text('[modules]\nrouting=true\ncodex_wrapper=true\n[paths]\nagents_registry="~/registry.jsonl"\nlimits_history="~/history/limits.jsonl"\n')
+        before = self.tree()
+        result = self.cli('run', '--dry-run')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        reads, writes = result.stdout.split('Application writes:')
+        for path in (self.home / 'registry.jsonl', self.home / 'history/routing-history.jsonl',
+                     self.home / '.claude/projects/*/*/subagents/*.meta.json'):
+            self.assertIn(str(path), reads)
+        self.assertIn(str(self.home / 'history/routing-history.jsonl'), writes)
+        self.assertIn('Brief paths referenced by those wrapper files', reads)
+        self.assertEqual(self.tree(), before)
+
+    def test_uninstall_cache_failure_preserves_recovery_record_and_can_resume(self):
+        self.settings(b'{"theme":"dark"}\n')
+        self.assertEqual(self.cli('install').returncode, 0)
+        cache = self.paths.data / 'claude-limits.json'
+        cache.write_text('{}')
+        unlink = Path.unlink
+        def fail_cache(path, *args, **kwargs):
+            if path == cache:
+                raise PermissionError('synthetic denial')
+            return unlink(path, *args, **kwargs)
+        with patch.object(Path, 'unlink', fail_cache), self.assertRaises(PermissionError):
+            uninstall(self.paths, argparse.Namespace(dry_run=False))
+        self.assertTrue(self.paths.state.is_file(), 'retry needs the recovery record')
+        self.assertTrue(self.paths.config.is_file(), 'cache cleanup is attempted first')
+        self.assertTrue(self.paths.backup.is_file())
+        self.assertEqual(self.paths.settings.read_bytes(), b'{"theme":"dark"}\n')
+        with redirect_stdout(io.StringIO()):
+            uninstall(self.paths, argparse.Namespace(dry_run=False))
+        self.assertFalse(cache.exists())
+        self.assertFalse(self.paths.state.exists())
+
+    def test_retired_planner_dry_run_does_not_claim_to_write_logs(self):
+        self.paths.config.parent.mkdir(parents=True, exist_ok=True)
+        self.paths.config.write_text('[modules]\ncodex_planner = true\n[paths]\ncodex_plan_errors = "~/plan-errors.jsonl"\n')
+        before = self.tree()
+        result = self.cli('run', '--dry-run')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.tree(), before)
+        log = str(self.home / 'plan-errors.jsonl')
+        self.assertNotIn(log, result.stdout)
+        self.assertNotIn('planner error log', result.stdout)
+        self.assertNotIn('planner price snapshots', result.stdout)
 
     def test_malformed_and_unsupported_settings_are_refused_without_changes(self):
         for raw in (b'{oops', b'[]', b'{"statusLine": {"type":"future"}}',

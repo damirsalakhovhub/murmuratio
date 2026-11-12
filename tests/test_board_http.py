@@ -10,6 +10,7 @@ import unittest
 from http.server import ThreadingHTTPServer
 from unittest.mock import patch
 
+from tests.board_fixture_helpers import fixture_parent
 from murmuratio_app.config import Config
 from murmuratio_app.now import NowSource
 from murmuratio_app.server import make_handler, sanitize
@@ -68,15 +69,19 @@ class BoardHTTPHarness(unittest.TestCase):
         path = self.codex_home / 'sessions/2026/11/07' / ('rollout-' + name + '.jsonl')
         meta = {'type': 'session_meta', 'timestamp': self.now - 60,
                 'payload': {'id': name, 'timestamp': self.now - 60,
-                            'cwd': '/synthetic/project', 'source': source}}
+                            'cwd': '/synthetic/project', 'source': source,
+                            **({'parent_session': 'fixture-launcher'} if source == 'exec' else {})}}
         return self.write(path, [meta] + (records if records is not None else [self.event('task_started')]))
 
     def claude(self, name, records, modified=None):
+        fixture_parent(self.home, name)
         return self.write(self.home / '.claude/projects/project' / (name + '.jsonl'), records, modified=modified)
 
     def desktop(self, name, **fields):
         path = self.home / 'Library/Application Support/Claude/claude-code-sessions/a/b' / ('local_' + name + '.json')
         path.parent.mkdir(parents=True, exist_ok=True)
+        if not fields.get('spawnedFrom'):
+            fixture_parent(self.home, name, role='orchestrator')
         path.write_text(json.dumps({'cliSessionId': name, **fields}), encoding='utf-8')
         return path
 
@@ -86,23 +91,38 @@ class BoardHTTPHarness(unittest.TestCase):
 
 
 class BoardHTTPTests(BoardHTTPHarness):
-    def test_native_codex_children_follow_visible_parent_and_hidden_chat_stays_hidden(self):
+    def test_now_accepts_loopback_forwarding_and_checks_last_proxy_hop(self):
+        cases = (
+            ('::1', 200),
+            ('::ffff:127.0.0.1', 200),
+            ('203.0.113.10, 127.0.0.1', 200),
+            ('203.0.113.10, ::1', 200),
+            ('127.0.0.1, 203.0.113.10', 403),
+            ('::1, 203.0.113.10', 403),
+            ('127.0.0.1, invalid', 403),
+        )
+        for forwarded, expected in cases:
+            with self.subTest(forwarded=forwarded):
+                connection = http.client.HTTPConnection('127.0.0.1', self.server.server_port, timeout=5)
+                try:
+                    connection.request('GET', '/api/now', headers={'X-Forwarded-For': forwarded})
+                    response = connection.getresponse()
+                    response.read()
+                    self.assertEqual(response.status, expected)
+                finally:
+                    connection.close()
+
+    def test_native_codex_children_make_both_worker_and_chat_parents_visible(self):
         self.rollout('worker')
         self.rollout('child', source={'subagent': {'thread_spawn': {'parent_thread_id': 'worker'}}})
         self.rollout('chat', source='cli')
         self.rollout('chat-child', source={'subagent': {'thread_spawn': {'parent_thread_id': 'chat'}}})
         cards = self.cards()
         self.assertEqual(cards['codex:child']['parent_id'], 'codex:worker')
-        self.assertNotIn('codex:chat', cards)
-        self.assertIsNone(cards['codex:chat-child']['parent_id'])
-        self.assertEqual(self.api()['codex_chats']['running'], 1)
-        self.config.show_codex_chats = True
-        self.start_server()
-        cards = self.cards()
         self.assertEqual(cards['codex:chat-child']['parent_id'], 'codex:chat')
         self.assertEqual(cards['codex:chat-child']['status'], 'working')
 
-    def test_claude_sidechain_is_part_of_parent_turn_not_a_card(self):
+    def test_claude_sidechain_has_a_nested_card_and_moves_to_finished(self):
         self.desktop('parent')
         self.claude('parent', [self.message('user', content='Coordinate'),
             self.message('assistant', stop_reason='tool_use', content=[{'type': 'tool_use', 'name': 'Agent', 'id': 'synthetic-tool', 'input': {}}])])
@@ -110,5 +130,22 @@ class BoardHTTPTests(BoardHTTPHarness):
         self.write(path, [dict(self.message('user', content='Do the work'), isSidechain=True),
                           dict(self.message('assistant', stop_reason='tool_use', content='Working'), isSidechain=True)])
         cards = self.cards()
-        self.assertEqual(set(cards), {'claude:parent'})
+        child_id = 'claude:parent:agent-synthetic'
+        self.assertEqual(set(cards), {'claude:parent', child_id})
         self.assertEqual(cards['claude:parent']['status'], 'working')
+        child = cards[child_id]
+        self.assertEqual((child['parent_id'], child['link'], child['project']),
+                         ('claude:parent', 'exact', cards['claude:parent']['project']))
+        self.assertEqual((child['status'], child['completed']), ('working', False))
+
+        self.write(path, [dict(self.message('assistant', at=self.now - 5,
+                                           stop_reason='end_turn', content='Done'), isSidechain=True)], mode='a')
+        state = self.api()
+        active = {card['id']: card for card in state['agents']}
+        finished = {card['id']: card for card in state['completed']}
+        self.assertEqual(set(active), {'claude:parent'})
+        self.assertEqual(active['claude:parent']['status'], 'working')
+        self.assertEqual(set(finished), {child_id})
+        self.assertEqual((finished[child_id]['status'], finished[child_id]['completed'],
+                          finished[child_id]['parent_id'], finished[child_id]['ended']),
+                         ('done', True, 'claude:parent', self.now - 5))

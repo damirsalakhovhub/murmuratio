@@ -67,9 +67,14 @@ class BoardLifecycleHTTPTests(BoardHTTPHarness):
         self.write(self.home / '.claude/projects/project/parent/subagents/agent-synthetic.jsonl',
                    [dict(self.message('assistant', stop_reason='tool_use', content='Working'), isSidechain=True)])
         cards = self.cards()
-        self.assertEqual(set(cards), {'claude:parent'})
+        child_id = 'claude:parent:agent-synthetic'
+        self.assertEqual(set(cards), {'claude:parent', child_id})
         self.assertEqual(cards['claude:parent']['status'], 'working')
         self.assertTrue(cards['claude:parent']['quiet'])
+        self.assertEqual((cards[child_id]['parent_id'], cards[child_id]['link'], cards[child_id]['status']),
+                         ('claude:parent', 'exact', 'working'))
+        self.assertFalse(cards[child_id]['completed'])
+        self.assertFalse(cards[child_id].get('quiet', False))
 
     def test_claude_lifecycle_uses_one_card_across_turns(self):
         self.desktop('lifecycle', title='Synthetic task', model='claude-sonnet-5-5')

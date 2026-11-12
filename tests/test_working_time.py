@@ -7,6 +7,7 @@ import time
 import unittest
 from unittest.mock import patch
 
+from tests.board_fixture_helpers import fixture_parent
 from murmuratio_app.config import Config
 from murmuratio_app.now import NowSource
 
@@ -18,6 +19,7 @@ class WorkingTimeTests(unittest.TestCase):
         self.home = Path(temporary.name)
         self.now = time.time()
         self.source = NowSource(self.home, clock=lambda: self.now, config=Config(), alive=lambda pid: pid == 7)
+        fixture_parent(self.home, 'chat')
         self.claude = self.home / '.claude/projects/project/chat.jsonl'
         self.codex = self.home / '.codex/sessions/2026/11/07/rollout-test-thread.jsonl'
 
@@ -36,13 +38,13 @@ class WorkingTimeTests(unittest.TestCase):
 
     def rollout(self, *records):
         self.append(self.codex, dict(type='session_meta', timestamp=self.now - 40000,
-                                    payload=dict(id='thread', source='exec')), *records)
+                                    payload=dict(id='thread', source='exec', parent_session='fixture-launcher')), *records)
 
     def wrapper(self, **extra):
         self.source.config.modules['codex_wrapper'] = True
         path = self.home / '.local/share/murmuratio/codex-runs/run.json'
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(dict(status='running', started=self.now - 40000, pid=7, **extra)))
+        path.write_text(json.dumps(dict(status='running', started=self.now - 40000, pid=7, parent_session='fixture-launcher', **extra)))
 
     def agent(self):
         state = self.source.state()
@@ -130,7 +132,7 @@ class WorkingTimeTests(unittest.TestCase):
         with patch('murmuratio_app.adapters.codex_board.rollout_writers', return_value={self.codex}):
             self.assertEqual(self.agent()['seconds'], 39999)
         self.append(self.codex, self.event('thread_settings_applied', self.now - 21),
-                    dict(type='session_meta', timestamp=self.now - 21, payload=dict(id='thread', source='exec')),
+                    dict(type='session_meta', timestamp=self.now - 21, payload=dict(id='thread', source='exec', parent_session='fixture-launcher')),
                     dict(type='turn_context', timestamp=self.now - 21, payload=dict(model='gpt-6.1-sol')),
                     self.event('task_started', self.now - 20),
                     self.event('task_complete', self.now - 5))

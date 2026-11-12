@@ -9,7 +9,9 @@ import tempfile
 import time
 from murmuratio_app.adapters.base import Adapter, AbsentSource, UnavailableSource, UnsupportedSource
 from murmuratio_app.adapters.limits import limit_window, rollout_limits
+from murmuratio_app.adapters.shared import JsonlSummary
 from murmuratio_app.common import timestamp
+from murmuratio_app import __version__
 
 
 CLAUDE_LIMITS_STALE_SECONDS = 30 * 60
@@ -105,56 +107,43 @@ class CodexLimitsAdapter(Adapter):
                 files.append((path.stat().st_mtime, path))
             except OSError:
                 self.unavailable()
+        readable, unreadable, sample = False, False, None
+        known = {'session_meta', 'event_msg', 'turn_context', 'response_item', 'token_usage_record', 'compacted'}
         for _, path in sorted(files, reverse=True)[:5]:
+            summary = JsonlSummary()
             try:
-                with path.open('rb') as handle:
-                    handle.seek(max(0, path.stat().st_size - 400000))
-                    content = handle.read().decode('utf-8', 'ignore')
-                lines = content.splitlines()
-            except OSError:
-                self.unavailable()
+                data = summary.refresh_tail(path, self.consume, 400000)
+            except OSError as exc:
+                self.unavailable(exc)
                 continue
-            parsed, recognized = False, False
-            complete = lines if content.endswith('\n') else lines[:-1]
-            known = {'session_meta', 'event_msg', 'turn_context', 'response_item', 'token_usage_record', 'compacted'}
-            for line in reversed(complete):
-                try:
-                    candidate = json.loads(line)
-                    if isinstance(candidate, dict):
-                        parsed = True
-                        if candidate.get('type') in known or '"rate_limits"' in line:
-                            recognized = True
-                            break
-                except (ValueError, TypeError):
-                    continue
-            if complete and (not parsed or not recognized):
-                self.unsupported()
-            for i, line in enumerate(reversed(lines)):
-                if '"rate_limits"' not in line:
-                    continue
-                try:
-                    data = json.loads(line)
-                except ValueError:
-                    # A trailing partial append is expected and will be retried.
-                    if i != 0 or content.endswith('\n'):
-                        self.unsupported()
-                    continue
-                windows = rollout_limits(data)
-                if windows:
-                    at = timestamp(data.get('timestamp')) if isinstance(data, dict) else None
-                    yield from self.emit(at, windows)
-                    return
-                stack = [data]
-                while stack:
-                    item = stack.pop()
-                    if isinstance(item, dict):
-                        if 'rate_limits' in item and item['rate_limits'] is not None:
-                            self.unsupported()
-                        stack.extend(item.values())
-                    elif isinstance(item, list):
-                        stack.extend(item)
-        if self.live:
-            yield from self.emit(*self.live)
+            if data.get('sample'):
+                readable = True
+                sample = data['sample']
+                break
+            if summary.unreadable(known) or data.get('invalid_limits'):
+                unreadable = True
+            elif summary.readable_types.intersection(known):
+                readable = True
+        if unreadable and not readable:
+            self.unsupported()
+        if sample or self.live:
+            yield from self.emit(*(sample or self.live))
+
+    @staticmethod
+    def consume(data, record):
+        windows = rollout_limits(record)
+        if windows:
+            data['sample'] = (timestamp(record.get('timestamp')), windows)
+            return
+        stack = [record]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, dict):
+                if 'rate_limits' in item and item['rate_limits'] is not None:
+                    data['invalid_limits'] = True
+                stack.extend(item.values())
+            elif isinstance(item, list):
+                stack.extend(item)
 
     def emit(self, at, windows):
         """Yield the newest sample: the rollout's, or a newer live read from Codex itself."""
@@ -187,7 +176,7 @@ def app_server_limits(command, timeout=15, clock=time.time):
         def send(message):
             process.stdin.write(json.dumps(message).encode() + b'\n')
             process.stdin.flush()
-        send({'id': 1, 'method': 'initialize', 'params': {'clientInfo': {'name': 'murmuratio', 'version': '1'}}})
+        send({'id': 1, 'method': 'initialize', 'params': {'clientInfo': {'name': 'murmuratio', 'version': __version__}}})
         def messages():
             # Raw reads: a buffered readline can hide a second line from select.
             pending = b''

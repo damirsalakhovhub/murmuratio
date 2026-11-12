@@ -42,26 +42,27 @@ class Adapter(ABC):
         with self._read_lock:
             self.status = 'available'
             self.reason = None
+            observations = []
             try:
-                observations = list(self.collect(*args, **kwargs))
+                for observation in self.collect(*args, **kwargs):
+                    observations.append(observation)
             except AbsentSource:
-                self.status, observations = 'absent', []
+                self.status = 'absent'
             except (UnavailableSource, OSError) as exc:
-                self.status, observations = 'unavailable', []
+                self.status = 'unavailable'
                 self.reason = read_error_reason(exc)
             except sqlite3.OperationalError as exc:
                 # Missing schema is incompatible; locks and open failures are temporary.
                 message = str(exc).lower()
                 self.status = 'unsupported' if 'no such table' in message or 'no such column' in message else 'unavailable'
                 self.reason = 'unrecognized_format' if self.status == 'unsupported' else 'read_failed'
-                observations = []
             except (UnsupportedSource, ValueError, TypeError, KeyError, AttributeError,
                     UnicodeError, sqlite3.DatabaseError):
-                self.status, observations = 'unsupported', []
+                self.status = 'unsupported'
                 self.reason = 'unrecognized_format'
             except Exception:
                 # Unexpected failures stay local and never expose paths or content.
-                self.status, observations = 'unavailable', []
+                self.status = 'unavailable'
                 self.reason = 'reader_failed'
             self.last_status = self.status
             return AdapterResult(self.name, self.status, observations, getattr(self, 'age_seconds', None), self.reason)

@@ -38,7 +38,7 @@ function stage(home) {
     const name = id(index), chat = index >= activeCount + doneCount;
     const cwd = `/synthetic/project-${index % 5}`;
     const records = [
-      {type: 'session_meta', timestamp: now - 60, payload: {id: name, source: chat ? 'cli' : 'exec', cwd}},
+      {type: 'session_meta', timestamp: now - 60, payload: {id: name, source: chat ? 'cli' : 'exec', cwd, ...(!chat ? {parent_session: 'fixture-launcher'} : {})}},
       event('task_started', now - 59),
       event('user_message', now - 58, {message: `Synthetic task ${name}`}),
       {type: 'response_item', timestamp: now - 57, payload: {type: 'function_call_output', output: recentPadding}},
@@ -70,7 +70,7 @@ function withoutClock(agent) {
 function checkSnapshot(snapshot) {
   assert.equal(snapshot.agents.length, activeCount);
   assert.equal(snapshot.completed.length, doneCount);
-  assert.deepEqual(snapshot.codex_chats, {hidden: chatCount, running: chatCount});
+  assert.equal('codex_chats' in snapshot, false);
   const actual = cards(snapshot);
   const expected = Array.from({length: activeCount + doneCount}, (_, index) => `codex:${id(index)}`);
   assert.deepEqual([...actual.keys()].sort(), expected.sort());
@@ -123,7 +123,7 @@ async function main() {
       && agent.ended < warm.body.local_day.end).length;
     assert(summary.includes(`${activeCount} running`));
     assert(summary.includes(`${doneToday} done today`));
-    assert(summary.includes(`Your Codex chats: ${chatCount}`));
+    assert(!summary.includes('Your Codex chats:'));
 
     const target = `codex:${id(0)}`;
     const file = path.join(corpus.directory, `rollout-${id(0)}.jsonl`);
@@ -133,7 +133,7 @@ async function main() {
     assert.deepEqual([...after.keys()].sort(), [...before.keys()].sort());
     assert.equal(appended.body.agents.length, activeCount - 1);
     assert.equal(appended.body.completed.length, doneCount + 1);
-    assert.deepEqual(appended.body.codex_chats, warm.body.codex_chats);
+    assert.equal('codex_chats' in appended.body, false);
     assert.equal(after.get(target).status, 'done');
     for (const [key, value] of before) {
       if (key !== target) assert.deepEqual(withoutClock(after.get(key)), withoutClock(value), key);
@@ -152,7 +152,7 @@ async function main() {
     assert(updatedSummary.includes(`${activeCount - 1} running`));
     assert(updatedSummary.includes(`${doneAfter} done today`));
     sample();
-    console.log(`Scale: ${oldCount} old + ${recentCount} recent, ${(corpus.size / 1048576).toFixed(1)} MiB, ${activeCount + doneCount} cards, ${chatCount} hidden chats`);
+    console.log(`Scale: ${oldCount} old + ${recentCount} recent, ${(corpus.size / 1048576).toFixed(1)} MiB, ${activeCount + doneCount} cards, ${chatCount} lone chats omitted`);
     console.log(`Scale timings: cold API ${cold.ms.toFixed(0)} ms, warm API ${warm.ms.toFixed(0)} ms, append API ${appended.ms.toFixed(0)} ms, first render ${renderMs.toFixed(0)} ms, sampled server peak RSS ${(peakRss / 1024).toFixed(1)} MiB`);
   } finally {
     if (sampler) clearInterval(sampler);

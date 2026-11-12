@@ -1,117 +1,83 @@
 # Murmuratio
 
-Beta software, provided "as is" without warranty of any kind. Use at your own risk. You are responsible for your data, your agents and their actions. See [LICENSE](LICENSE).
+Version **0.2.0-beta**. A local macOS board for Claude Code and Codex, together or separately. See orchestrators and workers grouped by project, with tasks, recorded models and effort, inferred status, context and usage limits.
 
-A local board for Claude Code and Codex on macOS. See orchestrators and their workers grouped by project, with their tasks, models, inferred status, context and usage limits.
+![Murmuratio board with sample orchestrators, workers and usage limits](docs/screenshot.png)
 
-![Murmuratio board with sample data: two projects, each with an orchestrator and its workers, one worker blocked waiting for approval, and Claude and Codex usage limits in the header](docs/screenshot.png)
+Beta software, provided as is. You are responsible for your data and your agents' actions. See [LICENSE](LICENSE) and [SECURITY.md](SECURITY.md).
 
-## Install
+## Install and run
 
 Requires macOS and Python 3.11 or newer. The application uses only the Python standard library.
 
 ```sh
-git clone https://github.com/damirsalakhovhub/murmuratio.git && cd murmuratio
-./murmuratio install   # --dry-run to preview, --launch-agent to start at login
-./murmuratio run       # http://127.0.0.1:8765/
+git clone https://github.com/damirsalakhovhub/murmuratio.git
+cd murmuratio
 ```
 
-Try it without installing: `./murmuratio run --demo` shows sample data. `./murmuratio doctor` checks local sources.
+Choose one lifecycle. Keep the cloned folder while installed. `--dry-run` previews installation and active data paths; `./murmuratio doctor` checks local sources. Try sample data without installing with `./murmuratio run --demo`.
 
-Keep the cloned folder while installed. If `~/.claude` exists, the installer backs up Claude Code settings and wraps the existing status line; otherwise it skips that step. Run install again after adding Claude to enable it.
+### Foreground
 
-Before restarting a running board after a code change, compare the checkout to the live board:
+```sh
+./murmuratio install
+./murmuratio run  # http://127.0.0.1:8765/
+```
+
+After updating the checkout, run the comparison below while the old board is still running. If it passes, stop the foreground server with Ctrl-C and run `./murmuratio run` again. Stop it before `./murmuratio uninstall`.
 
 ```sh
 ./murmuratio check-update --url http://127.0.0.1:8765
 ```
 
-Restart only if the command exits successfully. Use the running board's local URL and, if applicable, its `--config` and `--codex-home` values. The check reports changes to visible card IDs, projects, statuses and orchestrator roles. Unexplained losses, changed statuses or roles, unhealthy sources and an unstable live board block the restart. Retry if the live board changes while comparing. Confirmed archived sessions, hidden chats and expired workers may leave. No snapshot files are written, and task text is not printed.
+### LaunchAgent
 
-The source files can change during comparison: two matching live snapshots reduce this risk but do not freeze them. The check compares API data and the board's card-retention rules; it does not verify browser rendering.
+```sh
+./murmuratio install --launch-agent  # starts immediately and at login
+```
 
-## What it reads, writes and sends
+After updating the checkout, compare and restart the installed service:
 
-Reads by default:
+```sh
+./murmuratio check-update --url http://127.0.0.1:8765 &&
+  launchctl kickstart -k "gui/$(id -u)/org.murmuratio.app"
+```
 
-- Claude Code transcripts and subagent records: `~/.claude/projects/`. Claude desktop session metadata: `~/Library/Application Support/Claude/claude-code-sessions/`.
-- Saved Codex sessions and usage-limit events: `~/.codex/sessions/`. Exec workers, Codex subagents and Claude-linked workers appear without a wrapper or optional module. Interactive app and CLI chats are hidden from projects by default; running chats appear as `Your Codex chats: N` in the header. `CODEX_HOME` selects the Codex data directory.
-- Local open-file information from macOS `lsof`, to check whether an inactive Codex rollout still has a writer.
-- Claude limits cache: `~/.local/share/murmuratio/claude-limits.json`, plus an optional extra cache set as `claude_limits` under `[paths]`. The newest usable snapshot is selected.
-- With `codex_wrapper`: compatible run records in `~/.local/share/murmuratio/codex-runs/` (set `codex_runs` under `[paths]`) and the event files they reference. Murmuratio does not create wrapper records.
-- With `codex_chats`: `~/.codex/state_5.sqlite` and its WAL/SHM files, `~/.codex/.codex-global-state.json`, and referenced rollouts under `sessions/` or `archived_sessions/` in the Codex data directory.
+`./murmuratio uninstall` unloads the service and restores the previous status line. It removes owned installation files, the limits cache and unchanged installer-created configuration; edited configuration and derived history remain. Cache cleanup can be retried after a file-access failure.
 
-Writes:
+Use the running board's URL and `--config` value for comparisons. `CODEX_HOME` selects the Codex data directory for both `run` and `check-update`; export the same value for each. The installed LaunchAgent uses the launchd environment and does not capture terminal variables; use the foreground lifecycle for a custom terminal environment. The comparison blocks unexplained card losses, changed roles/statuses and new or changed failures in card sources (Claude Desktop, Claude sessions, Codex sessions, Codex wrapper and agents registry). Quota and usage source health is outside this comparison. An unchanged pre-existing card-source failure does not block the update. It reads API data without printing task text or writing snapshots; it does not verify browser rendering. Source files can still change during the check.
 
-- Configuration: `~/.config/murmuratio/config.toml`, created by install only if absent.
-- Installation records and settings backups: `~/.local/share/murmuratio/install/`.
-- When `~/.claude` exists: `~/.claude/settings.json`, to wrap `statusLine` while preserving the previous command. The wrapper writes the Claude limits cache above.
-- With `--launch-agent`: `~/Library/LaunchAgents/org.murmuratio.app.plist`.
-- Optional forecast and routing read and write `~/.local/share/murmuratio/limits-history.jsonl`; routing also writes `~/.local/share/murmuratio/routing.json`. These paths and the wrapper directory are configurable.
-- Optional context reset also reads `goals_1.sqlite` and `config.toml` in the Codex data directory, keeps recovery state at `~/.local/share/murmuratio/reset/reset-results.json`, and can change Codex data.
-- Browser preferences stay in local browser storage.
+## The board
 
-`./murmuratio run --dry-run` lists the active paths.
+- Named or registered orchestrators stay visible without children. Other top-level chats appear while they have an unfinished child or a child finished today. Identified Codex workers and recorded child sessions appear independently. An empty board means no eligible agents were found; a plain chat alone stays hidden.
+- Native Claude subagents have separate worker cards below their parent. Finished workers remain visible for 30 minutes; today's completed work still contributes to totals. An unfinished Codex worker stays however long it is quiet. Unsaved sessions are invisible.
+- Names prefer Desktop titles, then registry names, wrapper titles, subagent descriptions and meaningful task text (Claude's first prompt or Codex's latest user task). Models and effort come from saved records; unknown values stay unknown.
+- Unfinished cards signal high context at 80%. Set `[board] context_high_percent = 80` to change the threshold (1–100). The board has no chat viewer or context-reset controls.
+- Status, duration, parent matching and context are inferred from saved data. Exact parent IDs win; a unique folder/time match is marked inferred. Silence is not approval. Stale quota samples retain their age; a header line identifies old board snapshots.
+- Missing providers have no limits display. Calculator appears when Codex quota or credit data is available; it is hidden in demo mode.
 
-Sends: nothing during normal use. With `[limits] codex_live = true`, Codex itself reads your account's limits from OpenAI every 5 minutes. The HTTP server listens only on `127.0.0.1` and makes no model or account API calls. The previous status-line command and an explicitly confirmed experimental context reset can run software with its own network activity. See [SECURITY.md](SECURITY.md).
+## Local data and trust
 
-## Accuracy limits
+The server binds only to `127.0.0.1`. There is no access token: **any process or account on the same Mac can read `/api/now`, including session text. Do not run on shared machines.** Host and origin checks do not authenticate local users.
 
-- Claude native subagents are included in their parent turn and do not have separate cards.
-- An unfinished Codex worker stays on the board however long it is quiet; finished and crashed ones leave. Rollouts older than a day are checked by their first record and last lifecycle event and reread only when they change, so startup stays fast with months of history. The Codex chats tab lists every saved chat from Codex's own index, newest first. Ephemeral sessions without saved rollouts are invisible.
-- Launch classification uses `session_meta.source` (`exec` or a `subagent` object for workers; `cli`, `tui` or `vscode` for interactive chats), with `originator` as a fallback. Codex Desktop threads whose `thread_source` says an agent created or forked them are workers. A Claude parent link or wrapper record identifies a worker regardless of the interactive launch metadata. Finished cards leave the board after 30 minutes; their recent history still contributes to today's totals.
-- Claude-to-Codex parent links use recorded identifiers when available. Otherwise, a unique working-directory and launch-time match within about two minutes is marked inferred and may be wrong. Indirect or delayed launches may be missed.
-- Very large records may be read partially or skipped. Codex board reads buffer records up to 8 MiB; larger turn boundaries receive limited handling.
-- Status and context are inferred from saved data. Quiet unfinished Claude turns remain working for up to 24 hours after their last saved activity; silence alone never means approval is needed. Usage-limit numbers are snapshots and may be stale.
-- A completed wrapper record wins over unfinished rollout state. Codex threads with no rollout writer and no activity for over 30 minutes move to completed as crashed; a live wrapper process keeps its current status. If the process check fails, the board preserves the inferred status.
-- Only macOS is supported.
+Default reads: Claude transcripts and subagents in `~/.claude/projects/`, Claude Desktop metadata in `~/Library/Application Support/Claude/claude-code-sessions/`, Codex rollouts and thread titles under `~/.codex/`, the optional agents registry at `~/.claude/tools/agents-registry.jsonl`, and the Claude limits cache at `~/.local/share/murmuratio/claude-limits.json`. macOS `lsof` checks inactive Codex rollout writers. Very large records are bounded or skipped.
+
+Install creates `~/.config/murmuratio/config.toml` if absent and records/backups under `~/.local/share/murmuratio/install/`. If `~/.claude` exists, it wraps `statusLine` in `~/.claude/settings.json`, preserving the previous command; otherwise it skips that step. Install again after adding Claude to enable it. The wrapper writes only the Claude limits cache. Murmuratio never edits Codex chats or settings; SQLite may create WAL/SHM sidecars, and the Codex CLI can update its own state.
+
+Normal inspection sends nothing off the machine. Existing status-line commands can have their own network activity. Browser preferences stay in local storage. Inspect the complete active inventory with `./murmuratio run --dry-run`.
 
 ## Optional modules
 
-All modules are off by default. Set them to `true` under `[modules]` in `~/.config/murmuratio/config.toml`, then restart:
+All seven modules start off. Enable them under `[modules]` in the configuration and restart:
 
-- `forecast`: estimates usage limits; `scenarios` compares forecasts and requires `forecast`.
-- `routing`: writes a suggestion of which tool should take code and which design, so neither weekly quota is left unused at its reset. A tool whose remaining quota would last past its reset at the current pace gets more work; when both would, code goes to the one that resets first; a tool that cannot cover another work day gets less. Other scripts can read the suggestion from `routing.json`. Codex credits, which are spent only after the Codex weekly limit reaches 100%, are planned per month until they expire (`[routing] credits_expire = "MM-DD"`, default `"12-31"`) and per week within the month; this week's share counts as extra Codex capacity.
-- `codex_credits`: shows the credit balance left this month; `burn_rate` shows token usage rates.
-- `codex_chats`: shows saved chats; `context_reset` enables experimental resets and requires `codex_chats`.
-- `codex_wrapper`: reads wrapper records; `branding` adds board graphics.
+- `forecast` estimates weekly quota pace; `scenarios` compares worker allocation and requires `forecast`.
+- `routing` writes tool/model suggestions every minute; `codex_credits` shows credits and `burn_rate` shows usage rates.
+- `codex_wrapper` reads compatible wrapper records; `branding` adds board graphics.
 
-To show interactive Codex chats as full board cards, add this separate section and restart:
+Forecast/routing write `limits-history.jsonl` under `~/.local/share/murmuratio/`; routing also writes `routing.json` and changed advice in `routing-history.jsonl`. Burn-rate calculations can read quota history. Paths, project mappings, work hours and routing policy are configurable; see [Architecture](docs/ARCHITECTURE.md).
 
-```toml
-[board]
-show_codex_chats = true
-```
+Codex normally reports limits only while it works. Optional `[limits] codex_live = true` starts `codex app-server` every five minutes for `account/rateLimits/read`, with earlier reads at known resets. Codex contacts OpenAI with your signed-in account; no model call is made. Set `[paths] codex_cli` to choose its executable.
 
-This setting is independent of the `codex_chats` module, which enables the saved-chat browser tab.
+Murmuratio is not affiliated with Anthropic or OpenAI. Claude, Claude Code and Codex are their respective owners' trademarks. Usage and context estimates are not billing records.
 
-Codex writes its limits to session logs only while it works, so a quiet Codex shows its last known values with their age. To keep them current, add this section and restart:
-
-```toml
-[limits]
-codex_live = true
-```
-
-Every 5 minutes Murmuratio then starts `codex app-server` and sends one `account/rateLimits/read` request, the read the Codex app uses to show remaining limits and credits. It makes no model call and changes nothing, but Codex contacts OpenAI with your signed-in account. The `codex` command is found on `PATH`, in `/opt/homebrew/bin` or `/usr/local/bin`; set `codex_cli` under `[paths]` to choose another.
-
-## Uninstall
-
-```sh
-./murmuratio uninstall
-```
-
-This restores the previous status line and removes files the installer owns, the status line's limits cache and the folders the installer created when they are empty. Existing or edited configuration and other data, such as routing and history files, are kept. Older installations without file ownership records may leave their configuration or backup in place.
-
-## Disclaimer
-
-Murmuratio is not affiliated with or endorsed by Anthropic or OpenAI. Claude, Claude Code and Codex are trademarks of their respective owners.
-
-Normal inspection uses only local data and sends no data off your machine. Existing status-line commands and the optional context reset can run software with its own network activity, as described above. To the extent permitted by applicable law, the authors are not liable for any loss, damage, cost (including API or subscription usage), data exposure or downtime arising from use of Murmuratio. Usage-limit and context numbers are estimates and must not be relied on for billing or decisions.
-
-## More
-
-- [CHANGELOG.md](CHANGELOG.md)
-- [SECURITY.md](SECURITY.md)
-- [CONTRIBUTING.md](CONTRIBUTING.md) and [tests/README.md](tests/README.md) for development checks
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- [MIT license](LICENSE)
+[Changelog](CHANGELOG.md), [Security](SECURITY.md), [Contributing](CONTRIBUTING.md), [Tests](tests/README.md), [MIT license](LICENSE).

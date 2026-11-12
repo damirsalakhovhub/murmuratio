@@ -10,7 +10,7 @@ const fixture = JSON.parse(fs.readFileSync(path.join(root, 'fixtures/demo.json')
 const brandedIndex = fs.readFileSync(path.join(root, 'web/index.html'), 'utf8').replace(
   '  <!-- murmuratio-branding -->', fs.readFileSync(path.join(root, 'web/branding.html'), 'utf8').trimEnd());
 const disabled = Object.fromEntries(['forecast', 'scenarios', 'routing', 'codex_credits', 'burn_rate',
-  'codex_chats', 'context_reset', 'codex_wrapper', 'branding'].map(key => [key, false]));
+  'codex_wrapper', 'branding'].map(key => [key, false]));
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'murmuratio-demo-'));
 const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import main; main()', '--demo', '--port', '0', '--config', '/unreadable/personal.toml'],
   {cwd: root, env: {...process.env, HOME: temp, PORTLESS_URL: ''}, stdio: ['ignore', 'pipe', 'pipe']});
@@ -43,7 +43,8 @@ let browser;
         return request.continue();
       });
     }
-    await page.goto(base, {waitUntil: 'networkidle0'});
+    await page.evaluateOnNewDocument(() => { localStorage.setItem('murmuratio.source', 'codex'); localStorage.setItem('now-charts', 'on'); });
+    await page.goto(base + '/?codex=retired-link', {waitUntil: 'networkidle0'});
     await page.waitForSelector('.now-card');
     return page;
   }
@@ -51,6 +52,7 @@ let browser;
   const first = await demo.evaluate(async () => (await (await fetch('/api/now')).json()));
   const second = await demo.evaluate(async () => (await (await fetch('/api/now')).json()));
   assert.deepEqual(first, second, 'demo data is deterministic');
+  assert.equal(await demo.$eval('a[href="/calculator"]', el => el.hidden), true, 'demo hides Calculator without fixtures');
   const demoConfig = await demo.evaluate(async () => (await (await fetch('/api/config')).json()));
   assert.deepEqual(demoConfig.modules, disabled, 'demo matches a fresh configuration');
   assert(['forecast', 'routing', 'burn', 'credits'].every(key => !(key in first)));
@@ -60,7 +62,7 @@ let browser;
   await demo.screenshot({path: path.join(root, '.murmuratio-data/opensource-demo.png'), fullPage: true});
   await demo.close();
   const emptyBurn = await browser.newPage();
-  await emptyBurn.evaluateOnNewDocument(() => localStorage.setItem('now-block-view', 'burn'));
+  await emptyBurn.evaluateOnNewDocument(() => { localStorage.setItem('now-block-view', 'burn'); localStorage.setItem('now-charts', 'on'); });
   await emptyBurn.setRequestInterception(true);
   emptyBurn.on('request', request => {
     const pathname = new URL(request.url()).pathname;
@@ -101,11 +103,18 @@ let browser;
   const config = {modules: disabled, project_order: [], work_hours: [9, 21]};
   const publicPage = await pageWith(config, 390);
   assert.equal(await publicPage.$eval('#now-forecast', e => e.hidden), true);
-  assert.equal(await publicPage.$eval('.source-tabs', e => e.hidden), true);
+  assert.equal(await publicPage.$eval('.source-tabs', e => e.hidden), false);
+  assert.equal(await publicPage.$('#tab-codex'), null);
+  assert.equal(await publicPage.$('#workspace'), null);
+  assert.equal(await publicPage.$('[role=tab]'), null);
+  assert.equal(await publicPage.title(), 'Murmuratio — Board');
+  assert.notEqual(await publicPage.$('.source-tabs a[href="/calculator"]'), null);
   assert.equal(await publicPage.$('.now-credits'), null);
   assert.equal(await publicPage.$('.now-gauge-logo'), null);
   assert.equal(await publicPage.$('.now-identity svg'), null);
-  assert.equal(await publicPage.$eval('[data-agent-id="codex"] .now-task', e => e.hasAttribute('href')), false);
+  await publicPage.click('[data-agent-id="codex"] .now-task');
+  assert.equal(await publicPage.$('.now-panel .now-panel-open'), null);
+  await publicPage.keyboard.press('Escape');
   assert.equal(await publicPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   await publicPage.close();
 

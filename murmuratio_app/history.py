@@ -2,6 +2,49 @@
 import json
 from murmuratio_app.common import timestamp
 
+
+def read_routing_history(path):
+    """Valid advice in time order; incomplete or malformed records do not affect the board."""
+    if path is None:
+        return []
+    rows = []
+    try:
+        with path.open(encoding='utf-8', errors='replace') as stream:
+            for line in stream:
+                try:
+                    row = json.loads(line)
+                except (ValueError, RecursionError):
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                at = timestamp(row.get('at'))
+                if at is not None and all(row.get(key) in ('claude', 'codex') for key in ('code_to', 'design_to')):
+                    rows.append(dict(at=at, code_to=row['code_to'], design_to=row['design_to']))
+    except FileNotFoundError:
+        pass
+    return sorted(rows, key=lambda row: row['at'])
+
+
+def routing_history_addition(history, routing):
+    """A new row only when the advice changed, so the file stays small."""
+    row = dict(at=routing['at'], code_to=routing['code_to'], design_to=routing['design_to'])
+    last = history[-1] if history else None
+    if last and all(last[key] == row[key] for key in ('code_to', 'design_to')):
+        return None
+    return row
+
+
+def append_routing_history(path, routing):
+    addition = routing_history_addition(read_routing_history(path), routing)
+    if path is not None and addition:
+        with path.open('ab+') as stream:
+            if stream.tell():
+                stream.seek(-1, 2)
+                if stream.read(1) != b'\n':
+                    stream.write(b'\n')
+            stream.write((json.dumps(addition, allow_nan=False) + '\n').encode('utf-8'))
+
+
 def read_limit_history(path, now):
     """Load valid observations from the last 21 days and flag rows to prune."""
     history, prune = [], False

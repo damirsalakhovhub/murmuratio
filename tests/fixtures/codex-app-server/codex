@@ -24,14 +24,14 @@ for line in sys.stdin:
         if mode == 'error':
             print(json.dumps({'id': message['id'], 'error': {'code': -32600, 'message': 'not signed in'}}), flush=True)
             continue
-        # Sanitized from a real Codex 0.166 response on 2026-11-08.
+        # Synthetic measurements in the Codex app-server response format.
         print(json.dumps({'method': 'account/rateLimits/updated', 'params': {}}), flush=True)
         print(json.dumps({'id': message['id'], 'result': {
             'ordinaryUsageAllowed': True,
             'rateLimits': {'limitId': 'codex', 'limitName': None,
-                           'primary': {'usedPercent': 99, 'windowDurationMins': 10080, 'resetsAt': 1794207458},
+                           'primary': {'usedPercent': 99, 'windowDurationMins': 10080, 'resetsAt': 2000000000},
                            'secondary': None,
-                           'credits': {'hasCredits': True, 'unlimited': False, 'balance': '60831.6998586665'},
+                           'credits': {'hasCredits': True, 'unlimited': False, 'balance': '50000'},
                            'planType': 'pro', 'rateLimitReachedType': None}}}), flush=True)
     else:
         sys.exit(3)  # Anything else (for example consuming a reset credit) must never be sent.

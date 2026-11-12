@@ -35,7 +35,7 @@ class BoardCanaryHTTPTests(BoardHTTPHarness):
                  for card in state['agents'] + state['completed']}
         self.assertEqual(cards, expected)
         self.assertEqual({card[0] for card in cards.values()}, {'Alpha', 'Beta', 'Gamma'})
-        self.assertEqual(state['codex_chats']['hidden'], 3)
+        self.assertNotIn('codex_chats', state)
         self.now += 1800
         cards = self.cards()
         self.assertEqual(set(cards), {name for name in expected if name.endswith(('-root', '-working'))})

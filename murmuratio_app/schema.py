@@ -16,11 +16,11 @@ class Parent(TypedDict, total=False):
     parent_session: str
     parent_app_session: str
     orchestrator: bool
+    has_eligible_children: bool
     link: Literal['exact', 'inferred']
 
 
 class Action(TypedDict, total=False):
-    last_action: str
     current_action: str
 
 
@@ -37,14 +37,30 @@ class Context(TypedDict, total=False):
     context_tokens: int | None
     context_used: int | None
     context_window: int | None
+    context_percent: int | None
+    context_high: bool
+    context_level: Literal['low', 'mid', 'high', 'finished'] | None
+
+
+class Brief(TypedDict, total=False):
+    """The latest turn as the transcript shows it, for the card panel."""
+    request: str
+    reply: str
+    reply_cut: bool
+    commits: list[list[str]]
+    files: int
+    top_files: list[str]
+    asks: list[Literal['question', 'plan', 'approval']]
 
 
 class Session(Parent, Action, SessionTimes, Context, total=False):
     id: str
     kind: str
-    model: str
+    model: str | None
+    effort: str | None
     who: str
     task: str
+    title_source: str | None
     status: SessionStatus
     project: str
     cwd: str
@@ -52,8 +68,11 @@ class Session(Parent, Action, SessionTimes, Context, total=False):
     completed: bool
     quiet: bool
     app_session: str | None
+    subagent_id: str
+    agent_type: str
     thread: str | None
     codex_role: Literal['worker', 'chat']
+    brief: Brief | None
 
 
 class DesktopSession(TypedDict, total=False):
@@ -61,6 +80,7 @@ class DesktopSession(TypedDict, total=False):
     app_session: str
     title: str | None
     model: str | None
+    effort: str | None
     cwd: str | None
     archived: bool | None
     parent_session: str
@@ -106,22 +126,6 @@ class CodexMeter(TypedDict):
     points: list[CreditReading]
     usage: list[CodexBurnReading]
     latest: CreditReading | None
-
-
-class ContextTimeline(TypedDict):
-    points: list[dict]
-    compactions: list[dict]
-    last: dict
-    last_at: str | float | None
-    last_limit: int | None
-    pending_compact: bool
-    model: str | None
-    effort: str | None
-    top: list[dict]
-    hashes: dict[str, int]
-    categories: dict[str, int]
-    quota: dict | None
-    malformed: int
 
 
 T = TypeVar('T')

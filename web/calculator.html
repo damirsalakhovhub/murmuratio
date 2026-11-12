@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Murmuratio — Calculator</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/calculator.js" defer></script>
+</head>
+<body class="now-mode calculator-page">
+  <!-- murmuratio-branding -->
+  <div class="source-bar">
+    <div class="now-title"><h1 id="page-title">Calculator</h1></div>
+    <div class="now-right"><nav class="source-tabs" aria-label="Pages">
+      <a class="control button" href="/">Board</a>
+      <a class="control button" href="/calculator" aria-current="page">Calculator</a>
+    </nav></div>
+  </div>
+  <main class="calculator-view">
+    <p id="calculator-error" role="status" hidden></p>
+    <section class="calculator-visual" aria-label="Overview">
+      <div class="calculator-switch" role="radiogroup" aria-label="View">
+        <button type="button" role="radio" data-view="timeline" aria-checked="true">Timeline</button>
+        <button type="button" role="radio" data-view="rings" aria-checked="false">Rings</button>
+      </div>
+      <div class="calc-timeline" id="calc-timeline" data-view-panel="timeline">
+        <div class="calc-strip" id="calc-strip">
+          <div class="calc-credits-head" id="calc-resets-head"><span id="calc-resets-label">—</span><span id="calc-resets-end">—</span></div>
+          <div class="calc-lane" id="calc-above"></div>
+          <div class="calc-track" id="calc-track"></div>
+          <div class="calc-lane" id="calc-below"></div>
+        </div>
+        <div class="calc-credits">
+          <div class="calc-credits-head"><span id="calc-credits-label">—</span><span id="calc-credits-end">—</span></div>
+          <div class="calc-bar"><i id="calc-credits-fill"></i></div>
+        </div>
+      </div>
+      <div class="calc-rings" id="calc-rings" data-view-panel="rings" hidden>
+        <figure class="calc-ring" id="ring-week"></figure>
+        <figure class="calc-ring" id="ring-credits"></figure>
+        <figure class="calc-ring" id="ring-resets"></figure>
+      </div>
+    </section>
+    <section class="calculator-section" aria-labelledby="weekly-title">
+      <h2 id="weekly-title">Week</h2>
+      <dl class="calculator-values">
+        <div><dt>Used</dt><dd id="week-used">—</dd></div>
+        <div><dt>Left</dt><dd id="week-left">—</dd></div>
+        <div><dt>Resets at</dt><dd id="week-reset">—</dd></div>
+      </dl>
+    </section>
+    <section class="calculator-section" aria-labelledby="credits-title">
+      <h2 id="credits-title">Credits</h2>
+      <dl class="calculator-values">
+        <div><dt>Left</dt><dd id="credits-left">—</dd></div>
+        <div><dt>Expire at</dt><dd id="credits-expiry">—</dd></div>
+      </dl>
+    </section>
+    <section class="calculator-section" aria-labelledby="resets-title">
+      <h2 id="resets-title">Manual resets</h2>
+      <dl class="calculator-values" id="manual-resets">
+        <div><dt>Left</dt><dd id="resets-left">—</dd></div>
+      </dl>
+    </section>
+    <section class="calculator-section" aria-labelledby="mode-title" aria-live="polite">
+      <h2 id="mode-title" class="calculator-mode">—</h2>
+      <p id="mode-reason" class="calculator-reason"></p>
+    </section>
+  </main>
+</body>
+</html>

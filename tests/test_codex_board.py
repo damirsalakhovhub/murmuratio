@@ -3,6 +3,7 @@ import json
 import errno
 import http.client
 import os
+import sqlite3
 from pathlib import Path
 import subprocess
 import sys
@@ -13,6 +14,7 @@ from unittest.mock import patch
 
 from murmuratio_app.adapters.codex_board import rollout_writers
 from murmuratio_app.adapters.codex_sessions import CodexSource
+from tests.board_fixture_helpers import fixture_parent
 from murmuratio_app.config import Config
 from murmuratio_app.discovery import Discovery
 from murmuratio_app.now import NowSource
@@ -44,7 +46,8 @@ class CodexBoardTests(unittest.TestCase):
         path = self.home / '.codex/sessions/2026/11/07' / f'rollout-test-{thread}.jsonl'
         records = [
             {'type': 'session_meta', 'timestamp': started, 'payload': {
-                'id': thread, 'timestamp': started, 'cwd': cwd, 'source': source, 'run_id': run_id, **(metadata or {})}},
+                'id': thread, 'timestamp': started, 'cwd': cwd, 'source': source, 'run_id': run_id,
+                **(metadata or {})}},
             self.event('task_started', started + 1, model_context_window=200000),
             {'type': 'turn_context', 'timestamp': started + 1, 'payload': {'model': 'gpt-6.1-sol', 'cwd': cwd}},
             {'type': 'response_item', 'timestamp': started + 2, 'payload': {'type': 'message', 'role': 'user',
@@ -81,10 +84,9 @@ class CodexBoardTests(unittest.TestCase):
         self.rollout('interactive', source='vscode', finished=True)
         self.rollout('finished', finished=True)
         self.rollout('running')
-        self.source.codex = CodexSource(self.home / '.codex', lambda value: value)
+        self.source.codex = CodexSource(self.home / '.codex')
         agents = self.agents()
         self.assertEqual(set(agents), {'codex:finished', 'codex:running'})
-        self.assertEqual(self.source.state()['codex_chats'], {'hidden': 1, 'running': 0})
         self.assertEqual(agents['codex:finished']['status'], 'done')
         running = agents['codex:running']
         self.assertEqual((running['model'], running['task'], running['cwd']), ('gpt-6.1-sol', 'Build the board', self.cwd))
@@ -101,8 +103,11 @@ class CodexBoardTests(unittest.TestCase):
             self.rollout(name, source=None, metadata=self.launch_metadata(name))
         self.rollout('waiting-chat', finished=True, metadata=self.launch_metadata('desktop'))
         state = self.source.state()
-        self.assertEqual({a['id'] for a in state['agents']}, {'codex:exec', 'codex:exec_originator', 'codex:subagent'})
-        self.assertEqual(state['codex_chats'], {'hidden': 4, 'running': 3})
+        self.assertEqual({a['id'] for a in state['agents']},
+                         {'codex:exec', 'codex:exec_originator', 'codex:subagent'})
+        raw = {a['id']: a for a in self.source.codex_board_adapter.read(self.now).values()}
+        for name in ('exec', 'exec_originator', 'subagent'):
+            self.assertEqual(raw['codex:' + name]['codex_role'], 'worker')
         self.assertTrue(all(a['codex_role'] == 'worker' for a in state['agents']))
         self.assertFalse((self.home / '.claude').exists())
 
@@ -113,30 +118,19 @@ class CodexBoardTests(unittest.TestCase):
             self.rollout(name, source=None, metadata=self.launch_metadata(name))
         self.rollout('agent-done', source=None, finished=True, metadata=self.launch_metadata('desktop_agent_created'))
         state = self.source.state()
-        self.assertEqual({a['id'] for a in state['agents']}, {'codex:desktop_agent_created', 'codex:desktop_agent_forked'})
-        self.assertEqual([a['id'] for a in state['completed']], ['codex:agent-done'])
+        self.assertEqual({a['id'] for a in state['agents']},
+                         {'codex:desktop_agent_created', 'codex:desktop_agent_forked'})
+        raw = {a['id']: a for a in self.source.codex_board_adapter.read(self.now).values()}
+        for name in ('desktop_agent_created', 'desktop_agent_forked', 'agent-done'):
+            self.assertEqual(raw['codex:' + name]['codex_role'], 'worker')
+        self.assertEqual({a['id'] for a in state['completed']}, {'codex:agent-done'})
         self.assertTrue(all(a['codex_role'] == 'worker' for a in state['agents'] + state['completed']))
-        self.assertEqual(state['codex_chats'], {'hidden': 1, 'running': 1})
-
-    def test_board_option_shows_interactive_cards_without_saved_chat_module(self):
-        self.rollout('chat', metadata=self.launch_metadata('desktop'))
-        self.assertEqual(self.source.state()['agents'], [])
-        path = self.home / '.config/murmuratio/config.toml'
-        path.parent.mkdir(parents=True)
-        path.write_text('[board]\nshow_codex_chats = true\n')
-        self.source.config = Config.load(self.home)
-        state = self.source.state()
-        self.assertEqual([a['id'] for a in state['agents']], ['codex:chat'])
-        self.assertEqual(state['agents'][0]['codex_role'], 'chat')
-        self.assertEqual(state['codex_chats'], {'hidden': 0, 'running': 0})
-        self.assertFalse(self.source.config.modules['codex_chats'])
 
     def test_interactive_metadata_with_claude_link_is_a_worker(self):
         self.claude(command='codex exec task', output='thread_id: linked')
         self.rollout('linked', metadata=self.launch_metadata('desktop'))
         agent = self.agents()['codex:linked']
         self.assertEqual((agent['parent_id'], agent['codex_role']), ('claude:parent', 'worker'))
-        self.assertEqual(self.source.state()['codex_chats'], {'hidden': 0, 'running': 0})
         self.write(self.home / '.codex/sessions/2026/11/07/rollout-test-linked.jsonl',
                    [self.event('task_complete', self.now - 1)])
         agent = self.agents()['codex:linked']
@@ -148,12 +142,178 @@ class CodexBoardTests(unittest.TestCase):
         self.source.config.modules['codex_wrapper'] = True
         path = self.home / '.local/share/murmuratio/codex-runs/run.json'
         path.parent.mkdir(parents=True)
-        path.write_text(json.dumps({'status': 'running', 'thread': 'wrapped', 'cwd': self.cwd,
+        path.write_text(json.dumps({'parent_session': 'fixture-launcher', 'status': 'running', 'thread': 'wrapped', 'cwd': self.cwd,
                                     'started': self.now - 60, 'pid': 7}))
         agents = self.agents()
         self.assertEqual(set(agents), {'codex:parent-meta', 'codex:run'})
         self.assertTrue(all(a['codex_role'] == 'worker' for a in agents.values()))
         self.assertEqual(agents['codex:parent-meta']['status'], 'done')
+
+    def codex_orchestrators(self):
+        """Real 2026-11-10 case, anonymised: Codex app orchestrators and a worker one of them dispatched."""
+        path = self.home / '.config/murmuratio/config.toml'
+        path.parent.mkdir(parents=True)
+        path.write_text('[modules]\ncodex_wrapper = true\n[projects]\norder = ["Atlas", "Beacon", "Harbor"]\n'
+                        'fallback = "Harbor"\n[[projects.mappings]]\npath = "~/godot/Atlas"\nname = "Atlas"\n'
+                        'worktrees = true\n[[projects.mappings]]\npath = "~/beacon-app"\nname = "Beacon"\n'
+                        '[[projects.mappings]]\npath = "~/.claude"\nname = "Harbor"\nafter_inherit = true\n')
+        self.source.config = Config.load(self.home)
+        database = self.home / '.codex/state_5.sqlite'
+        database.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(database)
+        connection.execute('CREATE TABLE threads (id TEXT PRIMARY KEY, name TEXT, source TEXT)')
+        connection.executemany('INSERT INTO threads VALUES (?, ?, ?)', [
+            ('space-orch', 'Atlas orchestrator 005 CODEX', 'vscode'),
+            ('beacon-orch', 'Beacon orchestrator 002 CODEX', 'vscode'),
+            ('plain-chat', None, 'vscode'), ('env-worker', None, 'exec')])
+        connection.commit()
+        connection.close()
+        dev, environment = (str(self.home / 'godot/Atlas-worktrees' / name) for name in ('dev', 'environment'))
+        for coordinator in ('space-orch', 'beacon-orch'):
+            fixture_parent(self.home, coordinator, kind='codex', role='orchestrator')
+        app = {'originator': 'Codex Desktop', 'source': 'vscode'}
+        # Opened by its predecessor's handoff: the app records it like an agent-created worker.
+        self.rollout('space-orch', source='vscode', cwd=dev, started=self.now - 120,
+                     metadata={**app, 'thread_source': 'agent_created_thread'})
+        # Its open turn launches the worker and reads the launcher's output.
+        self.write(self.home / '.codex/sessions/2026/11/07/rollout-test-space-orch.jsonl', [
+            {'type': 'response_item', 'timestamp': self.now - 60, 'payload': {'type': 'custom_tool_call', 'name': 'exec'}},
+            {'type': 'response_item', 'timestamp': self.now - 59, 'payload': {'type': 'custom_tool_call_output'}}])
+        # Opened by the orchestrator tool: an unknown originator on an app source.
+        self.rollout('beacon-orch', source='vscode', cwd=str(self.home / 'beacon-app'), finished=True,
+                     started=self.now - 3000, metadata={'originator': 'codex-orch', 'source': 'vscode'})
+        self.rollout('plain-chat', source='vscode', cwd=str(self.home / 'notes'), finished=True,
+                     started=self.now - 3000, metadata={**app, 'thread_source': 'user'})
+        self.rollout('env-worker', cwd=environment, started=self.now - 59,
+                     metadata={'originator': 'Codex Desktop', 'source': 'exec', 'thread_source': 'user'})
+        # The Codex app inherited a Claude chat's environment, so the wrapper names that chat.
+        self.claude(name='harbor-orch', cwd=str(self.home / '.claude/tools'), at=self.now - 3000)
+        runs = self.home / '.local/share/murmuratio/codex-runs'
+        runs.mkdir(parents=True)
+        (runs / 'codex-task.env.json').write_text(json.dumps({
+            'status': 'running', 'title': 'Task: ATL-0034', 'mode': 'new', 'target': environment,
+            'thread': 'env-worker', 'tier': 'luna', 'model': 'gpt-6-luna', 'started': self.now - 60, 'pid': 7,
+            'parent_session': 'harbor-orch', 'parent_app_session': 'local_app', 'from_cwd': dev}))
+        return runs, dev
+
+    def test_codex_app_orchestrators_are_project_orchestrators_with_their_workers(self):
+        self.codex_orchestrators()
+        state = self.source.state()
+        agents = {agent['id']: agent for agent in state['agents'] + state['completed']}
+        for thread, project, name in (('space-orch', 'Atlas', 'Atlas orchestrator 005 CODEX'),
+                                      ('beacon-orch', 'Beacon', 'Beacon orchestrator 002 CODEX')):
+            agent = agents['codex:' + thread]
+            self.assertEqual((agent['orchestrator'], agent['codex_role'], agent['project'], agent['task'],
+                              agent['parent_id'], agent['completed']), (True, 'orchestrator', project, name, None, False))
+        self.assertEqual(agents['codex:space-orch']['status'], 'working')
+        self.assertEqual(agents['codex:beacon-orch']['status'], 'waiting')
+        worker = agents['codex:codex-task.env']
+        self.assertEqual((worker['parent_id'], worker['project'], worker['codex_role'], worker['orchestrator']),
+                         ('codex:space-orch', 'Atlas', 'worker', False))
+        self.assertNotIn('codex:plain-chat', agents)
+        self.assertNotIn('dev', {agent['project'] for agent in agents.values()})
+
+    def test_wrapper_keeps_its_claude_parent_when_launched_from_its_folder(self):
+        runs, dev = self.codex_orchestrators()
+        tools = str(self.home / '.claude/tools')
+        run = json.loads((runs / 'codex-task.env.json').read_text())
+        (runs / 'codex-task.env.json').write_text(json.dumps({**run, 'from_cwd': tools}))
+        worker = self.agents()['codex:codex-task.env']
+        self.assertEqual((worker['parent_id'], worker['project']), ('claude:harbor-orch', 'Harbor'))
+
+    def test_wrapper_keeps_its_claude_parent_when_no_codex_chat_was_open_there(self):
+        runs, dev = self.codex_orchestrators()
+        run = json.loads((runs / 'codex-task.env.json').read_text())
+        (runs / 'codex-task.env.json').write_text(json.dumps({**run, 'from_cwd': str(self.home / 'elsewhere')}))
+        self.assertEqual(self.agents()['codex:codex-task.env']['parent_id'], 'claude:harbor-orch')
+
+    def test_thread_name_from_session_index_titles_the_orchestrator_card(self):
+        """Real 2026-11-10 case, anonymised: a handed-off Codex orchestrator named by thread/name/set.
+
+        Its last user message must not become the title, and its launch folder is not its role."""
+        self.codex_orchestrators()
+        (self.home / '.codex/state_5.sqlite').unlink()
+        index = self.home / '.codex/session_index.jsonl'
+        index.write_text(''.join(json.dumps(record) + '\n' for record in (
+            {'id': 'space-orch', 'thread_name': 'Atlas orchestrator 004 CODEX', 'updated_at': '2026-11-10T12:15:34Z'},
+            {'id': 'env-worker', 'thread_name': 'Environment pass', 'updated_at': '2026-11-10T12:15:40Z'},
+            {'id': 'space-orch', 'thread_name': 'Atlas orchestrator 005 CODEX', 'updated_at': '2026-11-10T12:15:34Z'})))
+        self.write(self.home / '.codex/sessions/2026/11/07/rollout-test-space-orch.jsonl', [
+            {'type': 'response_item', 'timestamp': self.now - 30, 'payload': {'type': 'message', 'role': 'user',
+                'content': [{'type': 'input_text', 'text': 'merge the undo and redo buttons and put them in the bar'}]}}])
+        agents = self.agents()
+        orchestrator = agents['codex:space-orch']
+        self.assertEqual((orchestrator['task'], orchestrator['codex_role'], orchestrator['orchestrator'],
+                          orchestrator['project'], orchestrator['parent_id']),
+                         ('Atlas orchestrator 005 CODEX', 'orchestrator', True, 'Atlas', None))
+        # A thread title names a worker too, without making it an orchestrator.
+        worker = agents['codex:codex-task.env']
+        self.assertEqual((worker['task'], worker['codex_role']), ('Environment pass', 'worker'))
+        self.rollout('named-worker', cwd=str(self.home / 'godot/Atlas'))
+        with index.open('a') as stream:
+            stream.write(json.dumps({'id': 'named-worker', 'thread_name': 'Sun path readability'}) + '\n')
+        self.assertEqual(self.agents()['codex:named-worker']['task'], 'Sun path readability')
+
+    def test_state_database_name_wins_over_session_index(self):
+        self.codex_orchestrators()
+        (self.home / '.codex/session_index.jsonl').write_text(
+            json.dumps({'id': 'space-orch', 'thread_name': 'old title'}) + '\n')
+        self.assertEqual(self.agents()['codex:space-orch']['task'], 'Atlas orchestrator 005 CODEX')
+
+    def claude_task(self, *, session_id=None, transcript=True, prompt=None):
+        """Real 2026-11-10 case, anonymised: the Codex orchestrator ran claude-task for an Opus consult."""
+        runs, dev = self.codex_orchestrators()
+        environment = str(self.home / 'godot/Atlas-worktrees/environment')
+        events = self.home / '.claude/tools/codex-orchestrator/claude-runs/run-1/events.jsonl'
+        self.write(events, [
+            {'type': 'system', 'subtype': 'hook_started', 'session_id': 'consult-session'},
+            {'type': 'system', 'subtype': 'init', 'cwd': environment, 'session_id': 'consult-session'}])
+        record = {'status': 'done', 'tool': 'claude', 'title': 'Claude: Task: ATL-0040', 'mode': 'audit',
+                  'target': environment, 'cwd': environment, 'tier': 'claude-opus-5-5',
+                  'model': 'claude-claude-opus-5-5', 'events': str(events), 'started': self.now - 80, 'pid': 99,
+                  'task_id': 'ATL-0040', 'parent_session': 'space-orch', 'from_cwd': environment,
+                  'ended': self.now - 2, 'exit': 0}
+        if session_id:
+            record['session_id'] = session_id
+        (runs / 'claude-task.run-1.json').write_text(json.dumps(record))
+        if transcript:
+            rover = environment + '/scripts/rover-godot'
+            self.write(self.home / '.claude/projects/environment/consult-session.jsonl', [
+                {'type': 'custom-title', 'customTitle': 'Atlas environment: Task: ATL-0040'},
+                {'type': 'user', 'cwd': environment, 'timestamp': self.now - 78, 'message': {'content': prompt or
+                    '<stall-guard-worker/>\nRead-only review for the orchestrator. Do not write, commit or push.\n'
+                    'You are a Atlas direction worker.'}},
+                {'type': 'assistant', 'cwd': rover, 'timestamp': self.now - 2, 'message': {
+                    'stop_reason': 'end_turn', 'model': 'claude-opus-5-5', 'content': 'Both panels can share one style.'}}])
+
+    def test_claude_task_session_nests_under_the_codex_thread_that_ran_it(self):
+        for session_id in (None, 'consult-session'):
+            with self.subTest(recorded=session_id):
+                self.setUp()
+                self.claude_task(session_id=session_id)
+                agents = self.agents()
+                worker = agents['claude:consult-session']
+                self.assertEqual((worker['parent_id'], worker['project'], worker['orchestrator']),
+                                 ('codex:space-orch', 'Atlas', False))
+                self.assertEqual(worker['task'], 'Read-only review for the orchestrator.')
+                # The run and its session are one worker: no second card for the run.
+                self.assertNotIn('codex:claude-task.run-1', agents)
+                self.assertTrue(agents['codex:space-orch']['orchestrator'])
+
+    def test_current_claude_task_prompt_titles_by_its_session_name(self):
+        # Current launcher: line 1 is the session name, line 2 the worker marker carrying the parent.
+        self.claude_task(session_id='consult-session', prompt=(
+            'Atlas design consult: Panel style\n<stall-guard-worker parent="space-orch"/>\nRead-only review.'))
+        agents = self.agents()
+        worker = agents['claude:consult-session']
+        self.assertEqual((worker['task'], worker['parent_id']), ('Atlas design consult: Panel style', 'codex:space-orch'))
+        self.assertNotIn('codex:claude-task.run-1', agents)
+
+    def test_claude_task_run_without_its_transcript_still_nests_under_the_codex_thread(self):
+        self.claude_task(transcript=False)
+        run = self.agents()['codex:claude-task.run-1']
+        self.assertEqual((run['parent_id'], run['project'], run['task']),
+                         ('codex:space-orch', 'Atlas', 'ATL-0040'))
 
     def test_finished_subagent_uses_worker_completion(self):
         self.rollout('child', finished=True, metadata=self.launch_metadata('subagent'))
@@ -169,7 +329,7 @@ class CodexBoardTests(unittest.TestCase):
         self.assertEqual(self.agents(), {})
         self.assertEqual(list(self.home.iterdir()), [])
         self.claude()
-        self.assertEqual(set(self.agents()), {'claude:parent'})
+        self.assertEqual(self.agents(), {})
 
     def test_exact_thread_from_bash_output_beats_cwd_and_time(self):
         self.claude(command='codex exec --json "task"', output='{"thread_id":"thread-exact"}')
@@ -229,7 +389,6 @@ class CodexBoardTests(unittest.TestCase):
         self.assertEqual(agent['task'], 'Build the board')
 
     def test_partial_append_retries_and_truncation_resets(self):
-        self.source.config.show_codex_chats = True
         path = self.rollout('partial', finished=True)
         partial = json.dumps(self.event('task_started', self.now - 10))
         with path.open('a') as stream:
@@ -240,14 +399,15 @@ class CodexBoardTests(unittest.TestCase):
         self.assertEqual(self.agents()['codex:partial']['status'], 'working')
         path.unlink()
         self.rollout('partial', source='vscode', finished=True)
-        self.assertEqual(self.agents()['codex:partial']['status'], 'waiting')
+        self.assertNotIn('codex:partial', self.agents())
+        self.assertEqual(self.source.codex_board_adapter.read(self.now).values()[0]['status'], 'waiting')
 
     def test_partial_large_session_metadata_is_retried(self):
         thread = '12345678-1234-1234-1234-123456789abc'
         path = self.home / '.codex/sessions/2026/11/07' / f'rollout-test-{thread}.jsonl'
         path.parent.mkdir(parents=True)
         meta = json.dumps({'type': 'session_meta', 'timestamp': self.now - 10, 'payload': {
-            'base_instructions': 'x' * 600000, 'id': thread, 'cwd': self.cwd, 'source': 'exec'}})
+            'base_instructions': 'x' * 600000, 'id': thread, 'parent_session': 'fixture-launcher', 'cwd': self.cwd, 'source': 'exec'}})
         cut = 550000
         path.write_text(meta[:cut])
         self.agents()
@@ -272,10 +432,10 @@ class CodexBoardTests(unittest.TestCase):
     def test_wrapper_deduplication_and_missing_pid(self):
         self.rollout('thread', run_id='run-identifier')
         self.source.config.modules['codex_wrapper'] = True
-        self.source.codex = CodexSource(self.home / '.codex', lambda value: value)
+        self.source.codex = CodexSource(self.home / '.codex')
         path = self.home / '.local/share/murmuratio/codex-runs/run-identifier.json'
         path.parent.mkdir(parents=True)
-        path.write_text(json.dumps({'status': 'running', 'title': 'Wrapper title', 'thread': 'thread',
+        path.write_text(json.dumps({'parent_session': 'fixture-launcher', 'status': 'running', 'title': 'Wrapper title', 'thread': 'thread',
                                     'cwd': self.cwd, 'started': self.now - 60}))
         with patch.object(self.source.codex, 'read', side_effect=AssertionError('duplicate SQLite lookup')):
             agents = self.agents()
@@ -288,7 +448,7 @@ class CodexBoardTests(unittest.TestCase):
         self.source.config.modules['codex_wrapper'] = True
         directory = self.home / '.local/share/murmuratio/codex-runs'
         directory.mkdir(parents=True)
-        (directory / 'finished.json').write_text(json.dumps({
+        (directory / 'finished.json').write_text(json.dumps({'parent_session': 'fixture-launcher',
             'status': 'done', 'started': self.now - 60, 'ended': self.now - 10,
             'events': str(self.home / 'expired-temporary-events.jsonl')}))
         state = self.source.state()
@@ -310,7 +470,7 @@ class CodexBoardTests(unittest.TestCase):
         directory.mkdir(parents=True)
         events = self.home / 'events.jsonl'
         events.write_text('{}\n')
-        (directory / 'running.json').write_text(json.dumps({
+        (directory / 'running.json').write_text(json.dumps({'parent_session': 'fixture-launcher',
             'status': 'running', 'started': self.now - 60, 'pid': 7, 'events': str(events)}))
         open_file = Path.open
         def denied(path, *args, **kwargs):
@@ -337,7 +497,7 @@ class CodexBoardTests(unittest.TestCase):
         self.source.config.modules['codex_wrapper'] = True
         path = self.home / '.local/share/murmuratio/codex-runs/run-identifier.json'
         path.parent.mkdir(parents=True)
-        path.write_text(json.dumps({'status': 'running', 'title': 'Wrapper title', 'cwd': self.cwd,
+        path.write_text(json.dumps({'parent_session': 'fixture-launcher', 'status': 'running', 'title': 'Wrapper title', 'cwd': self.cwd,
                                     'started': self.now - 60, 'pid': 7}))
         agents = self.agents()
         self.assertEqual(set(agents), {'codex:run-identifier'})
@@ -348,7 +508,7 @@ class CodexBoardTests(unittest.TestCase):
         self.source.config.modules['codex_wrapper'] = True
         path = self.home / '.local/share/murmuratio/codex-runs/run.json'
         path.parent.mkdir(parents=True)
-        path.write_text(json.dumps({'status': 'running', 'thread': 'finished-thread', 'cwd': self.cwd,
+        path.write_text(json.dumps({'parent_session': 'fixture-launcher', 'status': 'running', 'thread': 'finished-thread', 'cwd': self.cwd,
                                     'started': self.now - 60}))
         agent = self.agents()['codex:run']
         self.assertEqual((agent['status'], agent['completed']), ('done', True))
@@ -358,7 +518,7 @@ class CodexBoardTests(unittest.TestCase):
         self.source.config.modules['codex_wrapper'] = True
         path = self.home / '.local/share/murmuratio/codex-runs/run.json'
         path.parent.mkdir(parents=True)
-        path.write_text(json.dumps({'status': 'done', 'thread': 'finished-thread', 'cwd': self.cwd,
+        path.write_text(json.dumps({'parent_session': 'fixture-launcher', 'status': 'done', 'thread': 'finished-thread', 'cwd': self.cwd,
                                     'started': self.now - 60, 'ended': self.now - 10}))
         agent = self.agents()['codex:run']
         self.assertEqual((agent['status'], agent['completed']), ('done', True))
@@ -368,7 +528,7 @@ class CodexBoardTests(unittest.TestCase):
         self.source.config.modules['codex_wrapper'] = True
         path = self.home / '.local/share/murmuratio/codex-runs/bad.json'
         path.parent.mkdir(parents=True)
-        path.write_text(json.dumps({'status': 'running', 'thread': {'unexpected': True},
+        path.write_text(json.dumps({'parent_session': 'fixture-launcher', 'status': 'running', 'thread': {'unexpected': True},
                                     'cwd': self.cwd, 'started': self.now - 60}))
         agents = self.agents()
         self.assertIn('codex:healthy', agents)
@@ -403,7 +563,7 @@ class CodexBoardTests(unittest.TestCase):
                                   ('', 'done'), ('BLOCKED: missing input', 'done')]:
             for pid in (None, 7, 8):
                 with self.subTest(verdict=verdict, pid=pid):
-                    path.write_text(json.dumps({'status': 'done', 'thread': 'unfinished', 'pid': pid,
+                    path.write_text(json.dumps({'parent_session': 'fixture-launcher', 'status': 'done', 'thread': 'unfinished', 'pid': pid,
                         'cwd': self.cwd, 'started': self.now - 3700, 'ended': self.now - 3650,
                         'verdict': verdict}))
                     before = path.read_bytes(), path.stat().st_mtime_ns
@@ -419,7 +579,7 @@ class CodexBoardTests(unittest.TestCase):
         self.source.config.modules['codex_wrapper'] = True
         path = self.home / '.local/share/murmuratio/codex-runs/run.json'
         path.parent.mkdir(parents=True)
-        path.write_text(json.dumps({'status': 'done', 'thread': 'unfinished',
+        path.write_text(json.dumps({'parent_session': 'fixture-launcher', 'status': 'done', 'thread': 'unfinished',
                                     'started': self.now - 60, 'verdict': 'CRASHED: wrapper exited'}))
         state = self.source.state()
         self.assertEqual(state['agents'], [])
@@ -436,7 +596,7 @@ class CodexBoardTests(unittest.TestCase):
         events = self.home / 'events.jsonl'
         self.write(events, [{'type': 'thread.started', 'thread_id': 'unfinished'}])
         ended = self.now - 19 * 3600
-        path.write_text(json.dumps({'status': 'done', 'events': str(events),
+        path.write_text(json.dumps({'parent_session': 'fixture-launcher', 'status': 'done', 'events': str(events),
                                     'started': self.now - 20 * 3600, 'ended': ended, 'verdict': 'DONE'}))
         state = self.source.state()
         self.assertEqual(state['agents'], [])
@@ -444,10 +604,10 @@ class CodexBoardTests(unittest.TestCase):
         self.assertEqual((agent['id'], agent['status'], agent['ended']), ('codex:run', 'done', ended))
 
     def test_inactive_codex_without_writer_moves_to_completed_after_30_minutes(self):
-        self.source.config.show_codex_chats = True
         for source, finished in [('exec', False), ('vscode', False)]:
             with self.subTest(source=source, finished=finished):
-                path = self.rollout('stale', source=source, started=self.now - 1900, finished=finished)
+                path = self.rollout('stale', source=source, started=self.now - 1900, finished=finished,
+                                    metadata={'parent_session': 'fixture-launcher'})
                 last_at = self.now - 1800
                 self.write(path, [self.event('token_count', last_at)])
                 # A recent mtime must not disguise an old last activity timestamp.
@@ -469,12 +629,11 @@ class CodexBoardTests(unittest.TestCase):
                 path.unlink()
 
     def test_S4_finished_chat_does_not_crash_after_idle(self):
-        self.source.config.show_codex_chats = True
         path = self.rollout('finished-chat', source='vscode', started=self.now - 1900, finished=True)
         with patch('murmuratio_app.adapters.codex_board.rollout_writers', return_value=set()) as probe:
             state = self.source.state()
-        agent, = state['agents']
-        self.assertEqual((agent['status'], agent['completed']), ('waiting', False))
+        self.assertEqual(state['agents'], [])
+        self.assertEqual(state['completed'], [])
         probe.assert_not_called()
 
     def test_B2_run_id_does_not_match_a_different_thread_namespace(self):
@@ -482,7 +641,7 @@ class CodexBoardTests(unittest.TestCase):
         directory = self.home / '.local/share/murmuratio/codex-runs'
         directory.mkdir(parents=True)
         for name, thread in [('collision', 'thread-one'), ('run-two', 'collision')]:
-            (directory / (name + '.json')).write_text(json.dumps({
+            (directory / (name + '.json')).write_text(json.dumps({'parent_session': 'fixture-launcher',
                 'status': 'running', 'thread': thread, 'started': self.now - 10, 'pid': 7}))
         agents = self.agents()
         self.assertEqual(set(agents), {'codex:collision', 'codex:run-two'})
@@ -493,7 +652,7 @@ class CodexBoardTests(unittest.TestCase):
         self.source.config.modules['codex_wrapper'] = True
         directory = self.home / '.local/share/murmuratio/codex-runs'
         directory.mkdir(parents=True)
-        (directory / 'before-midnight.json').write_text(json.dumps({
+        (directory / 'before-midnight.json').write_text(json.dumps({'parent_session': 'fixture-launcher',
             'status': 'done', 'started': midnight - 600, 'ended': midnight - 300}))
         self.assertIn('codex:before-midnight', self.agents())
 
@@ -513,7 +672,7 @@ class CodexBoardTests(unittest.TestCase):
         self.source.config.modules['codex_wrapper'] = True
         path = self.home / '.local/share/murmuratio/codex-runs/run.json'
         path.parent.mkdir(parents=True)
-        path.write_text(json.dumps({'status': 'running', 'thread': 'alive', 'pid': 7,
+        path.write_text(json.dumps({'parent_session': 'fixture-launcher', 'status': 'running', 'thread': 'alive', 'pid': 7,
                                     'cwd': self.cwd, 'started': self.now - 1900}))
         with patch('murmuratio_app.adapters.codex_board.rollout_writers', return_value=set()):
             state = self.source.state()
@@ -526,7 +685,7 @@ class CodexBoardTests(unittest.TestCase):
         self.source.config.modules['codex_wrapper'] = True
         path = self.home / '.local/share/murmuratio/codex-runs/run.json'
         path.parent.mkdir(parents=True)
-        path.write_text(json.dumps({'status': 'running', 'thread': 'alive', 'pid': 8,
+        path.write_text(json.dumps({'parent_session': 'fixture-launcher', 'status': 'running', 'thread': 'alive', 'pid': 8,
                                     'cwd': self.cwd, 'started': self.now - 1900}))
         with patch('murmuratio_app.adapters.codex_board.rollout_writers', return_value={rollout}):
             state = self.source.state()
@@ -546,7 +705,7 @@ class CodexBoardTests(unittest.TestCase):
         self.source.config.modules['codex_wrapper'] = True
         path = self.home / '.local/share/murmuratio/codex-runs/run.json'
         path.parent.mkdir(parents=True)
-        path.write_text(json.dumps({'status': 'running', 'thread': 'incomplete',
+        path.write_text(json.dumps({'parent_session': 'fixture-launcher', 'status': 'running', 'thread': 'incomplete',
                                     'cwd': self.cwd, 'started': self.now - 1901}))
         with patch('murmuratio_app.adapters.codex_board.rollout_writers', return_value=set()):
             state = self.source.state()
@@ -661,7 +820,7 @@ class CodexBoardTests(unittest.TestCase):
         self.rollout('first-long', started=launched + 2)
         self.rollout('second-long', started=launched + 2)
         agents = self.agents()
-        self.assertTrue(agents['claude:parent']['quiet'])
+        self.assertNotIn('claude:parent', agents)
         self.assertIsNone(agents['codex:first-long']['parent_id'])
         self.assertIsNone(agents['codex:second-long']['parent_id'])
 
@@ -676,7 +835,7 @@ class CodexBoardTests(unittest.TestCase):
         self.source.config.modules['codex_wrapper'] = True
         run = self.home / '.local/share/murmuratio/codex-runs/context-run.json'
         run.parent.mkdir(parents=True)
-        run.write_text(json.dumps({'status': 'running', 'thread': 'context-thread', 'events': str(events),
+        run.write_text(json.dumps({'parent_session': 'fixture-launcher', 'status': 'running', 'thread': 'context-thread', 'events': str(events),
                                    'cwd': self.cwd, 'pid': 7, 'started': self.now - 60}))
         agent = self.agents()['codex:context-run']
         self.assertEqual((agent['context_used'], agent['context_window']), (42000, 200000))
@@ -721,10 +880,17 @@ class CodexBoardTests(unittest.TestCase):
 
     def test_codex_only_http_uses_explicit_home_without_sqlite(self):
         path = self.rollout('http-thread')
+        self.rollout('http-finished', finished=True)
+        for name in ('desktop_agent_created', 'desktop_agent_forked'):
+            self.rollout(name, source=None, metadata=self.launch_metadata(name))
+        self.rollout('desktop-agent-done', source=None, finished=True,
+                     metadata=self.launch_metadata('desktop_agent_created'))
+        self.rollout('http-chat', source='cli')
         custom = self.home / 'custom'
         target = custom / 'sessions/2026/11/07' / path.name
         target.parent.mkdir(parents=True)
-        path.rename(target)
+        for rollout in path.parent.glob('*.jsonl'):
+            rollout.rename(target.parent / rollout.name)
         env = {**os.environ, 'HOME': str(self.home), 'CODEX_HOME': str(self.home / 'ignored'), 'PORTLESS_URL': ''}
         root = Path(__file__).resolve().parent.parent
         proc = subprocess.Popen([sys.executable, '-B', '-c', 'from murmuratio_app.server import main; main()',
@@ -738,7 +904,12 @@ class CodexBoardTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
             state = json.loads(response.read())
             conn.close()
-            self.assertEqual([agent['id'] for agent in state['agents']], ['codex:http-thread'])
+            self.assertEqual({agent['id'] for agent in state['agents']},
+                             {'codex:http-thread', 'codex:desktop_agent_created', 'codex:desktop_agent_forked'})
+            self.assertEqual({agent['id'] for agent in state['completed']},
+                             {'codex:http-finished', 'codex:desktop-agent-done'})
+            self.assertTrue(all(agent['codex_role'] == 'worker' and not agent.get('parent_session')
+                                for agent in state['agents'] + state['completed']))
             self.assertFalse((self.home / '.claude').exists())
         finally:
             proc.terminate()

@@ -1,0 +1,24 @@
+{
+  "at": 1794297600.0,
+  "credits": {
+    "balance": 48000,
+    "at": 1794297540.0,
+    "per_hour": 200,
+    "sample_credits": 100,
+    "sample_hours": 0.5,
+    "spent_per_day": 500,
+    "month_start_balance": 50000,
+    "week_start_balance": 48240,
+    "month_left": 0,
+    "month_ends_at": 1830279600.0,
+    "week_share_left": 0,
+    "credits_plan": {
+      "target_per_week": 0,
+      "spent_this_week": 240,
+      "expected_by_now": 0.0,
+      "credit_days_start": 1794596400.0,
+      "status": "over"
+    }
+  },
+  "reset": 1794769200.0
+}

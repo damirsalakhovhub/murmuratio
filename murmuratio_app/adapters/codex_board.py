@@ -2,17 +2,23 @@
 import json
 from pathlib import Path
 import re
+import sqlite3
 import subprocess
 
 from murmuratio_app.adapters.base import Adapter
 from murmuratio_app.adapters.activity import record_activity, working_seconds
 from murmuratio_app.adapters.parsing import consume_codex
-from murmuratio_app.adapters.shared import CODEX_DEAD_SECONDS, JsonlPrefix, context_number, current_action
+from murmuratio_app.adapters.brief import brief_view
+from murmuratio_app.adapters.shared import CODEX_DEAD_SECONDS, JsonlPrefix, context_number, current_action, model_context_window
 from murmuratio_app.common import one_line, timestamp
+from murmuratio_app.naming import display_name, name_fields, orchestrator_name
 
 HISTORY_SECONDS = 24 * 60 * 60
 MAX_RECORD_BYTES = 512 * 1024
-MAX_BUFFERED_BYTES = 8 * 1024 * 1024
+# Multimodal messages and compaction records can legitimately contain tens of
+# megabytes of embedded images/history. Keep a hard limit for damaged input.
+MAX_BUFFERED_BYTES = 64 * 1024 * 1024
+IMAGE_DATA = re.compile(rb'([,{]\s*"image_url"\s*:\s*")data:image/[a-zA-Z0-9.+-]+;base64,[a-zA-Z0-9+/=]+(")(?=\s*[,}])')
 AGENT_THREAD_SOURCES = ('agent_created_thread', 'agent_forked_thread', 'subagent')
 
 
@@ -26,6 +32,44 @@ def interactive_session(data):
     if source == 'exec' or originator == 'codex_exec' or isinstance(source, dict) and 'subagent' in source:
         return False
     return source in ('cli', 'tui', 'vscode') or originator in ('Codex Desktop', 'codex_cli_rs', 'codex-tui')
+
+
+def thread_names(database):
+    """Read-only thread titles from the Codex state database; none when unreadable."""
+    try:
+        if not database.is_file():
+            return {}
+        connection = sqlite3.connect(database.as_uri() + '?mode=ro', uri=True, timeout=1)
+        try:
+            columns = {row[1] for row in connection.execute('PRAGMA table_info(threads)')}
+            column = next((name for name in ('name', 'title') if name in columns), None)
+            if 'id' not in columns or column is None:
+                return {}
+            rows = connection.execute(f"SELECT id, {column} FROM threads WHERE {column} IS NOT NULL AND {column} != ''").fetchall()
+        finally:
+            connection.close()
+    except (OSError, sqlite3.Error):
+        return {}
+    return {thread: one_line(name) for thread, name in rows
+            if isinstance(thread, str) and isinstance(name, str) and one_line(name)}
+
+
+def index_names(path):
+    """Thread titles set by thread/name/set, as Codex appends them to session_index.jsonl; the last one wins."""
+    names = {}
+    try:
+        with path.open('rb') as stream:
+            for line in stream:
+                try:
+                    record = json.loads(line)
+                except (ValueError, UnicodeError, RecursionError):
+                    continue
+                if (isinstance(record, dict) and isinstance(record.get('id'), str)
+                        and isinstance(record.get('thread_name'), str) and one_line(record['thread_name'])):
+                    names[record['id']] = one_line(record['thread_name'])
+    except OSError:
+        return {}
+    return names
 
 
 def rollout_writers(paths):
@@ -48,24 +92,6 @@ def rollout_writers(paths):
         elif line.startswith('n') and access in ('w', 'u') and line[1:] in names:
             writers.add(names[line[1:]])
     return writers
-
-
-def _task_text(content):
-    if isinstance(content, str):
-        content = [{'text': content}]
-    if not isinstance(content, list):
-        return ''
-    for part in content:
-        text = part.get('text') if isinstance(part, dict) else None
-        if not isinstance(text, str):
-            continue
-        text = text.strip()
-        if (not text or text.startswith(('<environment_context>', '<permissions instructions>',
-                                        '<collaboration_mode>', '# AGENTS.md instructions',
-                                        '<user_instructions>', '<system>'))):
-            continue
-        return one_line(text[:1000])[:240]
-    return ''
 
 
 def consume_rollout(data, record):
@@ -124,20 +150,25 @@ def consume_rollout(data, record):
             data['_unsupported_lifecycle'] = True
             data['turn_state'] = 'unknown'
         elif event == 'user_message':
-            task = _task_text(payload.get('message', payload.get('text')))
-            if task:
+            task, source = display_name(text=payload.get('message', payload.get('text')))
+            if source:
                 data['task'] = task
+                data['task_raw'] = payload.get('message', payload.get('text'))
     elif kind == 'response_item':
         if payload.get('type') == 'message' and payload.get('role') == 'user':
-            task = _task_text(payload.get('content'))
-            if task:
+            content = payload.get('content')
+            text = content if isinstance(content, str) else '\n'.join(p.get('text', '') for p in content or [] if isinstance(p, dict))
+            task, source = display_name(text=text)
+            if source:
                 data['task'] = task
+                data['task_raw'] = text
         elif payload.get('type') in ('function_call', 'custom_tool_call'):
             data['current_action'] = current_action(payload.get('name', ''))
     elif kind == 'token_usage_record':
         usage = payload.get('usage')
         if isinstance(usage, dict) and context_number(usage.get('input_tokens')):
             data['context_tokens'] = usage['input_tokens']
+            data.pop('_context_invalidated', None)
 
 
 class BoardSummary:
@@ -186,10 +217,7 @@ class BoardSummary:
                             if pieces is not None:
                                 self._consume(b''.join(pieces))
                             else:
-                                # The discarded portion can contain lifecycle fields.
-                                # Never present the preceding state as confirmed.
-                                self.data['_unsupported_lifecycle'] = True
-                                self.data['turn_state'] = 'unknown'
+                                self._uncertain_record()
                             continue
                     self.offset = start
                     break
@@ -200,26 +228,37 @@ class BoardSummary:
 
     def _consume(self, line):
         try:
+            # Images are never used by the board. Drop only complete, unescaped
+            # data URLs in image_url fields before decoding large JSON records.
+            if len(line) > 8 * 1024 * 1024:
+                line = IMAGE_DATA.sub(rb'\1\2', line)
             record = json.loads(line)
             if not isinstance(record, dict):
+                self._uncertain_record()
                 return
-            if record.get('type') in ('session_meta', 'event_msg', 'turn_context', 'response_item', 'token_usage_record'):
+            if record.get('type') in ('session_meta', 'event_msg', 'turn_context', 'response_item', 'token_usage_record', 'compacted'):
                 consume_rollout(self.data, record)
             else:
                 at = timestamp(record.get('timestamp'))
                 if at is not None:
                     self.data['last_at'] = at
                     record_activity(self.data, at)
-        except (ValueError, TypeError, UnicodeError, OverflowError):
-            pass
+        except (ValueError, TypeError, KeyError, AttributeError, UnicodeError, OverflowError, RecursionError):
+            self._uncertain_record()
+
+    def _uncertain_record(self):
+        # A discarded record may have contained a turn or compaction boundary.
+        # Only this session becomes uncertain; never show stale context as current.
+        self.data.update(_unsupported_lifecycle=True, turn_state='unknown',
+                         context_tokens=None, _context_invalidated=True)
 
 LIFECYCLE = (b'"task_started"', b'"turn_started"', b'"task_complete"', b'"turn_complete"',
              b'"turn_aborted"', b'"task_aborted"')
 TAIL_BYTES = 256 * 1024
 
 
-def open_worker(path):
-    """Cheap check of an old rollout: is it a worker whose last turn never finished?
+def open_worker(path, orchestrators=()):
+    """Keep a known orchestrator or a worker whose last turn never finished.
 
     Reads the first record for the launch metadata and the file's tail for the last lifecycle event.
     A tail with no lifecycle event counts as open, so a long quiet turn is never missed."""
@@ -233,7 +272,9 @@ def open_worker(path):
         record = json.loads(first)
         if isinstance(record, dict) and record.get('type') == 'session_meta':
             consume_rollout(data, record)
-    except (ValueError, TypeError, UnicodeError, OverflowError):
+    except (ValueError, TypeError, KeyError, AttributeError, UnicodeError, OverflowError, RecursionError):
+        return True
+    if data.get('thread') in orchestrators:
         return True
     if interactive_session(data) and not (data.get('parent_session') or data.get('parent_app_session')):
         return False
@@ -259,34 +300,48 @@ class CodexBoardAdapter(Adapter):
     def __init__(self, root, project):
         super().__init__()
         self.root, self.project, self.cache = Path(root), project, {}
-        # Old rollouts: (mtime_ns, size) -> whether it is an open worker. Unchanged files are not reread.
+        # Old rollouts: (mtime_ns, size, orchestrator ids) -> whether they remain eligible.
         self.old = {}
         # Rollouts found with no writer, by (mtime_ns, size): crashed until the file changes.
         self.crashed = {}
+        self.index = (None, {})
 
-    def collect(self, now):
+    def names(self):
+        """Thread titles: the session index, overridden by the state database when it is readable."""
+        path = self.root.parent / 'session_index.jsonl'
+        try:
+            st = path.stat()
+            key = (st.st_ino, st.st_size, st.st_mtime_ns)
+        except OSError:
+            key = None
+        if key != self.index[0]:
+            self.index = (key, index_names(path) if key else {})
+        return {**self.index[1], **thread_names(self.root.parent / 'state_5.sqlite')}
+
+    def collect(self, now, registry=None):
         seen, old_seen = set(), set()
         stale = []
         root = self.root.resolve()
+        names = self.names()
+        orchestrators = frozenset({thread for thread, name in names.items() if orchestrator_name(name)}
+                                 | {thread for thread, record in (registry or {}).items()
+                                    if record.get('kind') == 'codex' and record.get('role') == 'orchestrator'})
         for path in self.files('*/*/*/rollout-*.jsonl'):
             try:
                 if not path.resolve().is_relative_to(root):
-                    self.unsupported()
                     continue
                 st = path.stat()
                 if now - st.st_mtime > HISTORY_SECONDS:
-                    # Past a day only an unfinished worker stays, however long it is quiet.
-                    key = (st.st_mtime_ns, st.st_size)
+                    # Old unfinished workers and named/registered orchestrators stay.
+                    key = (st.st_mtime_ns, st.st_size, orchestrators)
                     known = self.old.get(path)
                     if not known or known[0] != key:
-                        known = self.old[path] = (key, open_worker(path))
+                        known = self.old[path] = (key, open_worker(path, orchestrators))
                     old_seen.add(path)
                     if not known[1]:
                         continue
                 seen.add(path)
                 data, modified = self.cache.setdefault(path, BoardSummary()).refresh(path)
-                if data.get('_unsupported_lifecycle'):
-                    self.unsupported()
                 thread = data.get('thread')
                 if not thread:
                     match = re.search(r'([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$', path.stem, re.I)
@@ -296,17 +351,23 @@ class CodexBoardAdapter(Adapter):
                 cwd = data.get('cwd', '')
                 started = data.get('started') or data.get('turn_started') or modified
                 state = data.get('turn_state')
-                chat = interactive_session(data) and not (data.get('parent_session') or data.get('parent_app_session'))
+                linked = data.get('parent_session') or data.get('parent_app_session') or data.get('_parent_thread')
+                # A Codex app orchestrator can be opened by a tool or by its predecessor's handoff, so its
+                # launch metadata looks like a worker's; its thread title is the reliable role. A thread
+                # title set in the app or by thread/name/set also names the card better than the last message.
+                orchestrator = (not linked and data.get('source') != 'exec' and data.get('originator') != 'codex_exec'
+                                and orchestrator_name(names.get(thread)))
+                chat = orchestrator or interactive_session(data) and not (data.get('parent_session') or data.get('parent_app_session'))
                 status = ('hung' if state == 'working' and now - modified > 600 else state or 'waiting')
                 if status == 'done' and chat:
                     status = 'waiting'
                 end = data.get('ended') if status in ('done', 'blocked') else None
                 observation = self.observation(dict(
                     id='codex:' + thread, kind='codex', thread=thread,
-                    who='Codex', model=data.get('model', ''), cwd=cwd,
+                    who='Codex', model=data.get('model') or None, effort=data.get('effort'), cwd=cwd,
                     folder=Path(cwd).name if cwd else '—',
                     project=self.project(cwd) if cwd else 'Unknown',
-                    task=data.get('task') or 'Untitled', status=status,
+                    **name_fields(titles=[('desktop', names.get(thread))], text=data.get('task_raw', data.get('task'))), status=status,
                     started=started, turn_started=data.get('turn_started'), ended=end,
                     waiting_since=data.get('ended') if status == 'waiting' else None,
                     last_at=data.get('last_at') or modified,
@@ -314,10 +375,12 @@ class CodexBoardAdapter(Adapter):
                     _stopped_seconds=working_seconds(data, now, 'hung', started, data.get('last_at')),
                     completed=status == 'done', current_action=data.get('current_action', ''),
                     context_tokens=data.get('context_tokens'), context_used=data.get('context_tokens'),
-                    context_window=data.get('context_window'),
+                    context_window=model_context_window(data, data.get('model')), _context_invalidated=data.get('_context_invalidated', False),
+                    brief=brief_view(data, cwd),
                     parent_session=data.get('parent_session', ''),
                     parent_app_session=data.get('parent_app_session', ''),
-                    board_source='codex_rollout', codex_role='chat' if chat else 'worker', _rollout=True,
+                    board_source='codex_rollout',
+                    codex_role='orchestrator' if orchestrator else 'chat' if chat else 'worker', _rollout=True,
                     _run_id=data.get('run_id', ''), _parent_thread=data.get('_parent_thread'),
                     _turns=list(data.get('turns', []))),
                     data.get('last_at') or modified, 'inferred')
@@ -326,8 +389,11 @@ class CodexBoardAdapter(Adapter):
                     stale.append((path, observation, (st.st_mtime_ns, st.st_size)))
                 else:
                     yield observation
-            except OSError:
-                self.unavailable()
+            except OSError as exc:
+                self.unavailable(exc)
+            except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
+                # A single unrecognized rollout must not poison siblings.
+                continue
         if stale:
             unknown = [path for path, _, key in stale if self.crashed.get(path) != key]
             writers = rollout_writers(unknown) if unknown else set()

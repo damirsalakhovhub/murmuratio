@@ -25,12 +25,12 @@ class ClaudeUsageAdapter(Adapter):
                 if summary.malformed or (summary.record_types and not summary.record_types.intersection({'user', 'assistant'})):
                     self.unsupported()
                 session = path.parent.parent.name if path.parent.name == 'subagents' else path.stem
-                kind = 'worker' if desktop.get(session, {}).get('has_parent') else 'chat'
+                kind = 'worker' if path.parent.name == 'subagents' or desktop.get(session, {}).get('has_parent') else 'chat'
                 yield self.observation(dict(kind=kind, hours=data.get('hours', {}), models=data.get('models', {})),
                                        modified, 'inferred')
             except OSError:
                 self.unavailable()
-            except (ValueError, TypeError, OverflowError, AttributeError):
+            except (ValueError, TypeError, KeyError, OverflowError, AttributeError, RecursionError):
                 self.unsupported()
         self.cache = {p: v for p, v in self.cache.items() if p in seen}
 
@@ -45,6 +45,7 @@ class CodexMeterAdapter(Adapter):
 
     def collect(self, now, include_credits, include_burn):
         seen = set()
+        readable, unreadable = False, False
         root = self.root.resolve()
         for path in self.files('*/*/*/rollout-*.jsonl'):
             try:
@@ -57,12 +58,16 @@ class CodexMeterAdapter(Adapter):
                 summary = self.cache.setdefault(path, JsonlSummary())
                 data, modified = summary.refresh(path, lambda d, r: consume_codex_meter(d, r, include_credits, include_burn))
                 known = {'session_meta', 'event_msg', 'turn_context', 'response_item', 'token_usage_record', 'compacted'}
-                if summary.malformed or (summary.record_types and not summary.record_types.intersection(known)):
-                    self.unsupported()
+                if summary.unreadable(known):
+                    unreadable = True
+                elif summary.readable_types.intersection(known):
+                    readable = True
                 yield self.observation(dict(points=data.get('points', []), usage=data.get('usage', []),
                                             latest=data.get('latest')), modified, 'inferred')
             except OSError:
                 self.unavailable()
-            except (ValueError, TypeError, OverflowError, AttributeError):
-                self.unsupported()
+            except (ValueError, TypeError, KeyError, OverflowError, AttributeError, RecursionError):
+                unreadable = True
         self.cache = {p: v for p, v in self.cache.items() if p in seen}
+        if unreadable and not readable:
+            self.unsupported()

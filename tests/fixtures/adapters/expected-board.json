@@ -11,24 +11,29 @@
       "project": "example",
       "task": "Example task",
       "status": "working",
-      "last_action": "",
       "last_at": 1999900.0,
       "current_action": "",
       "started": 1999900.0,
-      "parent_session": "",
+      "parent_session": "fixture-launcher",
       "parent_app_session": "",
       "from_cwd": "",
       "seconds": 0,
       "context_tokens": null,
       "completed": false,
       "context_used": null,
-      "context_window": null,
+      "context_window": 475000,
       "ended": null,
       "verdict": "",
       "head": "",
       "codex_role": "worker",
       "parent_id": null,
-      "orchestrator": false
+      "orchestrator": false,
+      "brief": null,
+      "title_source": "wrapper",
+      "effort": null,
+      "context_percent": null,
+      "context_high": false,
+      "context_level": null
     },
     {
       "id": "claude:session-1",
@@ -41,7 +46,6 @@
       "task": "Example task",
       "title_source": "desktop",
       "status": "done",
-      "last_action": "Completed",
       "current_action": "",
       "started": 1999900.0,
       "turn_started": 1999900.0,
@@ -55,7 +59,21 @@
       "context_used": 20,
       "context_window": 1000000,
       "parent_id": null,
-      "orchestrator": false
+      "orchestrator": false,
+      "brief": {
+        "request": "Inspect the implementation",
+        "reply": "Completed",
+        "reply_cut": false,
+        "commits": [],
+        "files": 0,
+        "top_files": [],
+        "asks": []
+      },
+      "effort": null,
+      "context_percent": 0,
+      "context_high": false,
+      "context_level": "low",
+      "registered": true
     }
   ],
   "completed": [],
@@ -84,8 +102,8 @@
   "build": "fixture-build",
   "routing": {
     "at": 2000000,
-    "leader": "default",
-    "code_to": "codex",
+    "leader": "claude",
+    "code_to": "claude",
     "design_to": "claude",
     "tiers": {
       "codex": {
@@ -93,8 +111,8 @@
         "hard": "sol"
       },
       "claude": {
-        "simple": "Sonnet",
-        "hard": "Opus"
+        "simple": "Sonnet xhigh",
+        "hard": "Opus high"
       }
     },
     "claude": {
@@ -111,27 +129,90 @@
       "remaining": 75,
       "resets_at": 2600000.0,
       "days_left": 6.944444444444445,
-      "allowance_per_day": 10.807955801104972,
+      "allowance_per_day": 10.80805281553398,
       "burn_per_day": 0,
-      "headroom": 10.807955801104972,
+      "headroom": 0.4095683172202351,
+      "credits_percent": 0.11904761904761904,
       "credits": {
         "balance": 80.0,
         "expires_at": 5456000,
+        "per_hour": 400,
+        "per_hour_measured": false,
         "days_left": 40.0,
         "burn_per_day": 0,
-        "month_ends_at": 2864000,
-        "month_left": 26.666666666666664,
-        "month_pool": 26.666666666666668,
-        "weeks_left_in_month": 1.4365079365079365,
-        "week_share": 18.56353591160221,
-        "week_share_left": 18.56353591160221,
-        "week_share_percent": 0.05524861878453038,
-        "per_hour": 400,
-        "per_hour_measured": false
-      },
-      "credits_percent": 0.23809523809523808
+        "month_ends_at": 5456000,
+        "month_left": 80.0,
+        "month_pool": 80.0,
+        "weeks_left_in_month": 5.722222222222222,
+        "week_share": 13.980582524271844,
+        "week_share_left": 13.980582524271844,
+        "week_share_percent": 0.020804438280166433,
+        "credits_plan": {
+          "target_per_week": 13.980582524271844,
+          "spent_this_week": 0,
+          "expected_by_now": 0.11095700416088765,
+          "credit_days_start": 2427200.0,
+          "status": "on"
+        }
+      }
     },
-    "reason": "Both tools have sufficient headroom, so Codex leads code and Claude leads design. Codex's week includes 19 credits after its limit hits 100%."
+    "reason": "Claude takes code because Codex's projected demand exceeds its weekly quota, manual reset share and this week's credit share, while Claude keeps design with Sonnet xhigh for simple work and Opus high for hard work.",
+    "codex_fast": false,
+    "codex_boost": {
+      "terra": "sol",
+      "sol": "luna"
+    },
+    "codex_reset_reminder": null,
+    "codex_effort": null,
+    "codex_mode": {
+      "id": "saving",
+      "title": "Saving",
+      "reason": "Week at 25%, pace reaches 208% by Sat 31.",
+      "boost": {
+        "terra": "sol",
+        "sol": "luna"
+      },
+      "fast": false,
+      "effort": null,
+      "reset_share": 0,
+      "headroom": 0.4095683172202351,
+      "demand": 183.25617283950615,
+      "available": 75.05592233009709,
+      "reset_reminder": null,
+      "reset_plan": [],
+      "reset_deadlines": []
+    }
+  },
+  "health": {
+    "limits": {
+      "score": 0,
+      "reason": "Claude runs out before reset",
+      "parts": [
+        {
+          "tool": "claude",
+          "score": 0,
+          "ratio": 2.3061728395061727,
+          "used_percent": 30,
+          "resets_at": 2600000.0,
+          "hits_100_at": 2209353.846153846
+        },
+        {
+          "tool": "codex",
+          "score": 0,
+          "ratio": 2.441595108691659,
+          "used_percent": 25,
+          "resets_at": 2600000.0,
+          "hits_100_at": 2245557.8947368423
+        }
+      ]
+    },
+    "assignments": {
+      "score": 100,
+      "reason": "No workers started in the last day",
+      "judged": 0,
+      "wrong": [],
+      "since": 2000000
+    }
   },
   "forecast": {
     "claude": {
@@ -144,9 +225,13 @@
           30
         ]
       ],
-      "pace_per_day": null,
-      "projected_at_reset": null,
-      "hits_100_at": null,
+      "pace_per_day": 28.88888888888889,
+      "projected_at_reset": 230.61728395061726,
+      "hits_100_at": 2209353.846153846,
+      "prior_per_day": 14.285714285714286,
+      "pace_source": "default",
+      "live_weight": 0.027777777777777776,
+      "rate_per_hour": 1.2037037037037037,
       "worker_share": 1.0
     },
     "codex": {
@@ -159,9 +244,13 @@
           25
         ]
       ],
-      "pace_per_day": null,
-      "projected_at_reset": null,
-      "hits_100_at": null,
+      "pace_per_day": 26.38888888888889,
+      "projected_at_reset": 208.25617283950615,
+      "hits_100_at": 2245557.8947368423,
+      "prior_per_day": 14.285714285714286,
+      "pace_source": "default",
+      "live_weight": 0.027777777777777776,
+      "rate_per_hour": 1.099537037037037,
       "credits": {
         "balance": 80.0,
         "at": 1999900.0,
@@ -170,11 +259,19 @@
         "sample_hours": 0.0,
         "spent_per_day": 0.0,
         "month_start_balance": 80.0,
-        "month_left": 26.666666666666664,
-        "month_ends_at": 2864000,
         "week_start_balance": 80.0,
-        "week_share_left": 18.56353591160221
-      }
+        "month_left": 80.0,
+        "month_ends_at": 5456000,
+        "week_share_left": 13.980582524271844,
+        "credits_plan": {
+          "target_per_week": 13.980582524271844,
+          "spent_this_week": 0,
+          "expected_by_now": 0.11095700416088765,
+          "credit_days_start": 2427200.0,
+          "status": "on"
+        }
+      },
+      "credits_per_percent": 250.0
     }
   },
   "burn": {
@@ -194,10 +291,6 @@
       "hours": []
     }
   },
-  "codex_chats": {
-    "hidden": 0,
-    "running": 0
-  },
   "credits": {
     "balance": 80.0,
     "at": 1999900.0,
@@ -206,9 +299,61 @@
     "sample_hours": 0.0,
     "spent_per_day": 0.0,
     "month_start_balance": 80.0,
-    "month_left": 26.666666666666664,
-    "month_ends_at": 2864000,
     "week_start_balance": 80.0,
-    "week_share_left": 18.56353591160221
-  }
+    "month_left": 80.0,
+    "month_ends_at": 5456000,
+    "week_share_left": 13.980582524271844,
+    "credits_plan": {
+      "target_per_week": 13.980582524271844,
+      "spent_this_week": 0,
+      "expected_by_now": 0.11095700416088765,
+      "credit_days_start": 2427200.0,
+      "status": "on"
+    }
+  },
+  "calculator": {
+    "used_percent": 25,
+    "next_reset": 2600000.0,
+    "remaining_percent": 75,
+    "extra_resets": [],
+    "credits_balance": 80.0,
+    "credits_per_percent": 250.0,
+    "credits_expire_at": 5456000,
+    "mode": {
+      "id": "saving",
+      "title": "Saving",
+      "reason": "Week at 25%, pace reaches 208% by Sat 31.",
+      "boost": {
+        "terra": "sol",
+        "sol": "luna"
+      },
+      "fast": false,
+      "effort": null,
+      "reset_share": 0,
+      "headroom": 0.4095683172202351,
+      "demand": 183.25617283950615,
+      "available": 75.05592233009709,
+      "reset_reminder": null,
+      "reset_plan": [],
+      "reset_deadlines": []
+    },
+    "timeline": {
+      "start": 1995200.0,
+      "end": 2600000.0,
+      "expires_at": null,
+      "windows": [
+        {
+          "start": 1995200.0,
+          "end": 2600000.0,
+          "ends": "natural",
+          "current": true
+        }
+      ],
+      "resets": []
+    },
+    "credits_start_balance": 80.0,
+    "resets_total": 0
+  },
+  "refresh_failed": false,
+  "snapshot_at": 2000000
 }

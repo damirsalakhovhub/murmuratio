@@ -35,7 +35,7 @@ class ServerTests(unittest.TestCase):
         return result
 
     def test_static_assets_and_response_headers(self):
-        for path in ('/', '/app.js', '/now.js', '/panels.js', '/activity.js', '/style.css'):
+        for path in ('/', '/app.js', '/now.js', '/style.css', '/calculator', '/calculator.js', '/geist.woff2'):
             with self.subTest(path=path):
                 code, body, headers = self.request(path)
                 self.assertEqual(code, 200)
@@ -45,6 +45,7 @@ class ServerTests(unittest.TestCase):
                 self.assertIn("frame-ancestors 'none'", headers['Content-Security-Policy'])
                 self.assertIn("script-src 'self'", headers['Content-Security-Policy'])
                 self.assertNotIn('Access-Control-Allow-Origin', headers)
+        self.assertEqual(self.request('/geist.woff2')[2]['Content-Type'], 'font/woff2')
         self.assertEqual(json.loads(self.request('/api/now')[1]), {'agents': [], 'completed': []})
 
     def test_removed_routes_and_private_files_are_unavailable(self):
@@ -71,7 +72,7 @@ class ServerTests(unittest.TestCase):
                         {'Sec-Fetch-Site': 'cross-site'}, {'Sec-Fetch-Site': 'same-site'},
                         {'X-Forwarded-For': '203.0.113.10'}, {'X-Forwarded-For': 'invalid'}):
             self.assertEqual(self.request('/api/now', headers=headers)[0], 403)
-        self.assertEqual(self.request('/api/codex/reset/prepare', 'POST', '{}',
+        self.assertEqual(self.request('/unknown', 'POST', '{}',
                                      {'Content-Type': 'application/json'})[0], 403)
 
     def test_cross_site_top_level_navigation_can_open_board(self):
@@ -98,7 +99,7 @@ class ServerTests(unittest.TestCase):
 
     def test_cross_site_api_and_assets_stay_forbidden(self):
         for path in ('/api/now', '/api/config', '/api/codex/state', '/app.js',
-                     '/now.js', '/panels.js', '/activity.js', '/style.css', '/index.html', '/missing'):
+                     '/now.js', '/style.css', '/index.html', '/missing'):
             for mode, dest in (('cors', 'empty'), ('navigate', 'document')):
                 with self.subTest(path=path, mode=mode, dest=dest):
                     headers = {**CROSS_SITE_NAVIGATION, 'Sec-Fetch-Mode': mode,
@@ -114,7 +115,7 @@ class ServerTests(unittest.TestCase):
 
     def test_cross_site_posts_stay_forbidden_even_with_navigation_headers(self):
         for site in ('cross-site', 'same-site'):
-            for path in ('/', '/api/codex/reset/prepare'):
+            for path in ('/', '/unknown'):
                 with self.subTest(site=site, path=path):
                     headers = {**CROSS_SITE_NAVIGATION, 'Sec-Fetch-Site': site,
                                'Origin': f'http://127.0.0.1:{self.http.server_port}',
@@ -140,6 +141,55 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn(secret, encoded)
         self.assertEqual(result['safe'], 'visible')
         self.assertEqual(original['access_token'], 'private')
+
+
+class RoutingRefreshTests(unittest.TestCase):
+    def test_state_is_refreshed_on_a_timer_with_no_requests(self):
+        import threading
+        from murmuratio_app.server import keep_routing_fresh
+        calls, enough = [], threading.Event()
+        class Source:
+            def state(self):
+                calls.append(1)
+                if len(calls) == 2:
+                    raise RuntimeError('one failing tick does not stop the timer')
+                if len(calls) >= 3:
+                    enough.set()
+        stop = threading.Event()
+        thread = keep_routing_fresh(Source(), interval=0.01, stop=stop)
+        self.assertTrue(enough.wait(2))
+        stop.set()
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+
+    def test_routing_file_is_written_after_warm_up_without_a_request(self):
+        import json, tempfile, threading, time
+        from unittest.mock import patch
+        from murmuratio_app.config import Config
+        from murmuratio_app.now import NowSource
+        from murmuratio_app.server import keep_routing_fresh
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            config = Config.load(home)
+            config.modules.update(routing=True, codex_credits=True)
+            source = NowSource(home, config=config)
+            release = threading.Event()
+            def scan(*args):
+                release.wait(5)
+                return 'available', ({'balance': 80, 'per_hour': 10}, [], [])
+            stop = threading.Event()
+            with patch.object(source, '_collect_codex_usage', side_effect=scan):
+                source.state()  # the one request comes during the warm-up
+                self.assertFalse(config.routing_file.exists())
+                thread = keep_routing_fresh(source, interval=0.05, stop=stop)
+                release.set()
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and not config.routing_file.exists():
+                    time.sleep(0.02)
+                stop.set()
+                thread.join(2)
+            self.assertIn('codex_boost', json.loads(config.routing_file.read_text()))
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

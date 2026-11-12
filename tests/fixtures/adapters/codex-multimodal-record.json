@@ -1,0 +1,29 @@
+{
+  "timestamp": "2026-01-01T00:00:00Z",
+  "ordinal": 1,
+  "type": "response_item",
+  "payload": {
+    "type": "message",
+    "id": "sanitized-message",
+    "role": "user",
+    "content": [
+      {"type": "input_text", "text": "Review these images"},
+      {"type": "input_text", "text": "First image"},
+      {"type": "input_image", "detail": "high", "image_url": "IMAGE_1"},
+      {"type": "input_text", "text": "Next"},
+      {"type": "input_text", "text": "Second image"},
+      {"type": "input_image", "detail": "high", "image_url": "IMAGE_2"},
+      {"type": "input_text", "text": "Next"},
+      {"type": "input_text", "text": "Third image"},
+      {"type": "input_image", "detail": "high", "image_url": "IMAGE_3"},
+      {"type": "input_text", "text": "Done"}
+    ],
+    "internal_chat_message_metadata_passthrough": {
+      "turn_id": "sanitized-turn",
+      "create_time": 0,
+      "content_item_kinds": ["user.text", "user.text", "user.image", "user.text", "user.text", "user.image", "user.text", "user.text", "user.image", "user.text"],
+      "content_item_metadata": []
+    }
+  },
+  "metadata": {"retained_source": null, "client_authored": true, "user_input_order": 0, "mcp_attribution": null}
+}

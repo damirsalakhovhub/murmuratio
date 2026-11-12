@@ -64,6 +64,8 @@ class BoardGhostHTTPTests(BoardHTTPHarness):
             name = 'sample-' + str(index)
             records = [{**record, 'sessionId': name} for record in self.records]
             self.write(self.home / '.claude/projects' / name / (name + '.jsonl'), records)
+            from tests.board_fixture_helpers import fixture_parent
+            fixture_parent(self.home, name)
         cards = self.cards()
         self.assertEqual(len(cards), 9, 'B2: identical prompts do not merge different session IDs')
         self.assertTrue(all(a['status'] == 'done' and not a['orchestrator'] for a in cards.values()))

@@ -1,0 +1,50 @@
+[
+  {
+    "before": "Kind: impl",
+    "brief": "Mode: DRAFT\nKind: impl\nTask: SAMPLE-1. Fix example labels\n",
+    "expected": "SAMPLE-1. Fix example labels",
+    "source": "first_user"
+  },
+  {
+    "before": "At the limit stop, report what works.",
+    "brief": "Task: SAMPLE-2\nTime box: 5 min\nAt the limit stop, report what works.\nReview the example\n",
+    "expected": "Review the example",
+    "source": "first_user"
+  },
+  {
+    "before": "Pre-mortem: missing result",
+    "brief": "Mode: DRAFT\nPre-mortem: missing result\n# Build a sample table\n",
+    "expected": "Build a sample table",
+    "source": "first_user"
+  },
+  {
+    "before": "At the limit stop, commit what works.",
+    "brief": "Task: SAMPLE-3\nAt the limit stop, commit what works.\nProcess: paused\nUpdate example output\n",
+    "expected": "Update example output",
+    "source": "first_user"
+  },
+  {
+    "before": "Pre-mortem: incorrect completion",
+    "brief": "Mode: DRAFT\nPre-mortem: incorrect completion\n# Keep finished workers\n",
+    "expected": "Keep finished workers",
+    "source": "first_user"
+  },
+  {
+    "before": "Pre-mortem: incorrect label",
+    "brief": "Mode: DRAFT\nPre-mortem: incorrect label\n# Hide guessed marks on subagents\n",
+    "expected": "Hide guessed marks on subagents",
+    "source": "first_user"
+  },
+  {
+    "before": "Board cleanup 2-4",
+    "brief": "# Fix example labels\n",
+    "expected": "Cleanup 2-4",
+    "source": "wrapper"
+  },
+  {
+    "before": "Fix example labels",
+    "brief": "# Update a sample\n",
+    "expected": "Fix example labels",
+    "source": "description"
+  }
+]

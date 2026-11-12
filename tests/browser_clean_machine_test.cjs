@@ -19,6 +19,7 @@ function stageClaude(home) {
     {type: 'assistant', timestamp: new Date((now - 60) * 1000).toISOString(), cwd: '/work/atlas', sessionId: 'clean-claude',
       message: {role: 'assistant', model: 'claude-sonnet-5-5', stop_reason: 'tool_use',
         content: [{type: 'tool_use', name: 'Bash', id: 'tool-1', input: {command: 'git log'}}]}}]));
+  write(path.join(home, '.claude/tools/agents-registry.jsonl'), jsonl([{id: 'clean-claude', kind: 'claude', role: 'worker', parent_id: 'fixture-launcher'}]));
   write(path.join(home, '.claude/settings.json'), '{\n  "theme": "dark"\n}\n');
 }
 
@@ -26,7 +27,7 @@ function stageCodex(home) {
   const started = new Date((now - 90) * 1000).toISOString();
   write(path.join(home, '.codex/sessions/2026/11/08/rollout-2026-11-08T10-00-00-clean-codex.jsonl'), jsonl([
     {type: 'session_meta', timestamp: started, payload: {id: 'clean-codex', timestamp: started, cwd: '/work/harbor',
-      source: 'exec', originator: 'codex_exec'}},
+      source: 'exec', originator: 'codex_exec', parent_session: 'fixture-launcher'}},
     {type: 'event_msg', timestamp: started, payload: {type: 'task_started', model_context_window: 200000}},
     {type: 'turn_context', timestamp: started, payload: {model: 'gpt-6.1-sol', cwd: '/work/harbor'}},
     {type: 'response_item', timestamp: started, payload: {type: 'message', role: 'user',
@@ -73,13 +74,15 @@ async function setup(browser, name, stage) {
     await page.waitForSelector('.now-card, .now-empty:not([hidden])');
     const state = await page.evaluate(async () => (await fetch('/api/now')).json());
     const cards = await page.$$eval('.now-card', es => es.map(e => e.dataset.agentId));
-    const gauges = await page.$$eval('.now-gauge', es => es.map(e => e.getAttribute('aria-label')));
+    const gauges = await page.$$eval('.now-gauge[aria-label*="% used"]', es => es.map(e => e.getAttribute('aria-label')));
+    const unavailable = await page.$$eval('.now-gauge[aria-label$="limits unavailable"]', es => es.map(e => e.getAttribute('aria-label')));
+    const calculator = await page.$eval('a[href="/calculator"]', el => !el.hidden && getComputedStyle(el).display !== 'none');
     const empty = await page.$eval('.now-empty', e => e.hidden ? '' : e.textContent);
     const notice = await page.$eval('#now-error', e => e.hidden ? '' : e.textContent);
     await page.close();
     await stopServer(running.server); running = null;
     success(runCli(env, 'uninstall'));
-    return {state, cards, gauges, empty, notice, left: tree(home).filter(line => !before.includes(line))};
+    return {state, cards, gauges, unavailable, calculator, empty, notice, left: tree(home).filter(line => !before.includes(line))};
   } finally {
     if (running) await stopServer(running.server);
     fs.rmSync(home, {recursive: true, force: true});
@@ -94,22 +97,40 @@ async function main() {
     const claude = await setup(browser, 'claude', stageClaude);
     assert.deepEqual(claude.cards, ['claude:clean-claude'], 'Claude only: its session is a card');
     assert.deepEqual(claude.gauges.map(g => g.split(' ').slice(0, 2).join(' ')), ['Claude 5h', 'Claude week'], 'Claude only: its limits');
+    assert.deepEqual(claude.unavailable, [], 'Absent Codex limits are hidden');
+    assert.equal(claude.calculator, false, 'Claude-only has no empty Codex calculator');
     assert.equal(claude.notice, '', 'Claude only: a missing Codex is not an error');
     assert.deepEqual(claude.left, [], 'Claude only: uninstall leaves nothing');
     results['Claude only'] = 'PASS';
 
+    const chat = await setup(browser, 'claude-chat', home => {
+      stageClaude(home);
+      fs.unlinkSync(path.join(home, '.claude/tools/agents-registry.jsonl'));
+    });
+    assert.deepEqual(chat.cards, [], 'A plain terminal chat stays hidden');
+    assert.deepEqual(chat.state.agents, []);
+    assert.equal(chat.empty, 'Your Claude Code and Codex chats appear on the board once they start agents.');
+    assert.equal(chat.notice, '');
+    assert.deepEqual(chat.left, []);
+    results['Claude terminal chat'] = 'PASS';
+
     const codex = await setup(browser, 'codex', stageCodex);
     assert.deepEqual(codex.cards, ['codex:clean-codex'], 'Codex only: its worker is a card');
     assert.deepEqual(codex.gauges.map(g => g.split(' ').slice(0, 2).join(' ')), ['Codex 5h', 'Codex week'], 'Codex only: its limits');
+    assert.deepEqual(codex.unavailable, [], 'Absent Claude limits are hidden');
+    assert.equal(codex.calculator, true, 'Codex weekly data enables the calculator');
     assert.equal(codex.notice, '', 'Codex only: a missing Claude is not an error');
     assert.deepEqual(codex.left, [], 'Codex only: uninstall leaves nothing');
     results['Codex only'] = 'PASS';
 
     const neither = await setup(browser, 'neither', () => {});
     assert.deepEqual(neither.cards, []);
+    assert.deepEqual(neither.gauges, []);
+    assert.deepEqual(neither.unavailable, []);
+    assert.equal(neither.calculator, false);
     assert.match(neither.empty, /Claude Code/);
     assert.match(neither.empty, /Codex/);
-    assert.match(neither.empty, /None were found/);
+    assert.equal(neither.empty, 'Your Claude Code and Codex chats appear on the board once they start agents.');
     assert.equal(neither.notice, '', 'Neither: nothing is reported as broken');
     assert.deepEqual(neither.left, [], 'Neither: uninstall leaves nothing');
     results.Neither = 'PASS';

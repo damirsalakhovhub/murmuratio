@@ -56,6 +56,14 @@ async function main() {
       {type: 'event_msg', timestamp, payload: {type: 'task_started'}},
     ].map(r => JSON.stringify(r)).join('\n') + '\n');
   }
+  // Lifecycle fixtures represent launched agents; coordinators are explicitly registered.
+  const registry = path.join(home, '.claude/tools/agents-registry.jsonl');
+  fs.mkdirSync(path.dirname(registry), {recursive: true});
+  fs.writeFileSync(registry, Object.keys(expected).map(id => {
+    const name = id.slice('claude:'.length), root = name === 'idle-orchestrator' || name === 'missing-start' || name.endsWith('-root');
+    return JSON.stringify({id: name, kind: 'claude', role: root ? 'orchestrator' : 'worker',
+      parent_id: root ? null : name.endsWith('-finished') ? name.replace(/-finished$/, '-root') : 'fixture-launcher'});
+  }).join('\n') + '\n');
   const env = {...process.env, HOME: home, CODEX_HOME: path.join(home, 'codex')};
   delete env.PORTLESS_URL;
   const server = spawn(process.env.PYTHON || 'python3', ['-B', '-c',

@@ -19,7 +19,7 @@ class BoardIncrementalHTTPTests(BoardHTTPHarness):
         self.assertEqual(self.cards()['codex:incremental']['status'], 'working')
         replacement = path.with_suffix('.new')
         meta = {'type': 'session_meta', 'timestamp': self.now - 60,
-                'payload': {'id': 'incremental', 'source': 'exec', 'cwd': '/synthetic/project'}}
+                'payload': {'id': 'incremental', 'parent_session': 'fixture-launcher', 'source': 'exec', 'cwd': '/synthetic/project'}}
         self.write(replacement, [meta, self.event('user_message', message='New inode'), self.event('task_complete')])
         os.replace(replacement, path)
         self.assertEqual(self.cards()['codex:incremental']['task'], 'New inode')

@@ -9,9 +9,9 @@ const root = path.resolve(__dirname, '..');
 const artifacts = path.join(root, '.murmuratio-data/now-verification');
 const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'murmuratio-board-'));
 const fixtureConfig = path.join(fixtureRoot, 'config.toml');
-fs.writeFileSync(fixtureConfig, '[modules]\nforecast = true\nscenarios = true\nrouting = true\ncodex_credits = true\nburn_rate = true\ncodex_chats = true\ncontext_reset = true\ncodex_wrapper = true\nbranding = true\n');
+fs.writeFileSync(fixtureConfig, '[modules]\nforecast = true\nscenarios = true\nrouting = true\ncodex_credits = true\nburn_rate = true\ncodex_wrapper = true\nbranding = true\n');
 const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import main; main()', '--port', '0', '--config', fixtureConfig,
-  '--codex-home', path.join(fixtureRoot, 'codex'), '--data-dir', path.join(fixtureRoot, 'data')],
+  '--codex-home', path.join(fixtureRoot, 'codex')],
   {cwd: root, env: {...process.env, HOME: fixtureRoot, PORTLESS_URL: ''}, stdio: ['ignore', 'pipe', 'pipe']});
 
 (async () => {
@@ -38,22 +38,24 @@ const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import
     const item = (id, project, changes = {}) => ({id, project, kind: 'claude', who: 'Claude Opus 5.5', model: 'claude-opus-5-5',
       folder: 'dev', task: id, started: at(18, 0), last_at: at(18, 30), status: 'working', ...changes});
     const atlas = item('atlas', 'Atlas', {orchestrator: true, status: 'waiting', waiting_since: at(18, 31), task: 'Review implementation'});
-    const gameplay = item('gameplay', 'Atlas', {kind: 'codex', model: 'gpt-6.1-terra', folder: 'gameplay', parent_id: 'atlas',
+    const gameplay = item('gameplay', 'Atlas', {kind: 'codex', model: 'gpt-6.1-terra', effort: 'high', folder: 'gameplay', parent_id: 'atlas',
       started: at(8, 34), seconds: 360, task: 'Update the dashboard component', current_action: 'editing dashboard.py',
-      thread: 'fixture-thread', board_source: 'codex_rollout', link: 'inferred', context_tokens: 987654, context_used: 49, context_window: 100});
+      thread: 'fixture-thread', board_source: 'codex_rollout', link: 'inferred', guessed: true,
+      brief: {reply: '# Update\n**Skill loaded:** `dashboard.py`\n- **Fixed** the header\n1. _Kept_ line breaks\n+ Preserve snake_case and <script>window.pwned=1</script>'},
+      context_tokens: 987654, context_used: 49, context_window: 100, context_level: 'low', context_percent: 49, context_high: false});
     const icons = item('icons', 'Atlas', {parent_id: 'atlas', folder: 'interfaces', status: 'done', task: 'Review the layout',
       started: at(17, 51), ended: at(18, 18), seconds: 27 * 60});
     const northstar = item('northstar', 'Northstar', {orchestrator: true, status: 'idle', last_at: at(18, 9), task: 'Prepare reference materials'});
     const arts = item('arts', 'Northstar', {parent_id: 'northstar', folder: 'arts', started: at(18, 9), current_action: 'generating 4 images',
-      task: 'Prepare sample artwork', context_used: 80, context_window: 100});
+      task: 'Prepare sample artwork', context_used: 80, context_window: 100, context_level: 'high', context_percent: 80, context_high: true});
     const harbor = item('harbor', 'Harbor', {orchestrator: true, status: 'idle', last_at: at(18, 28), task: 'Coordinate project'});
     const inspector = item('inspector', 'Harbor', {kind: 'codex', model: 'gpt-6.1-sol', folder: 'inspector', parent_id: 'harbor',
-      started: at(18, 27), current_action: 'tests', task: 'Test the board', context_used: 50, context_window: 100});
+      started: at(18, 27), current_action: 'tests', task: 'Test the board', context_used: 50, context_window: 100, context_level: 'mid', context_percent: 50, context_high: false});
     const done = item('done', 'Harbor', {kind: 'codex', model: 'gpt-6.1-sol', folder: 'inspector', parent_id: 'harbor', status: 'done', completed: true,
       task: 'Fix display labels', started: at(18, 22), ended: at(18, 27), seconds: 300, head: 'a1b2c3d', verdict: 'REPORT DUMP '.repeat(200)});
     let payload = {now, agents: [gameplay, icons, arts, inspector, atlas, northstar, harbor], completed: [done]}, polls = 0, fail = false;
     const page = await browser.newPage(); track(page);
-    await page.evaluateOnNewDocument(() => localStorage.setItem('murmuratio.source', 'now'));
+    await page.evaluateOnNewDocument(() => { localStorage.setItem('murmuratio.source', 'now'); localStorage.setItem('now-charts', 'on'); });
     await page.setViewport({width: 1280, height: 1000, deviceScaleFactor: 1});
     await page.emulateMediaFeatures([{name: 'prefers-color-scheme', value: 'light'}]);
     await page.setRequestInterception(true);
@@ -70,15 +72,21 @@ const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import
       await image.decode(); return {width: image.naturalWidth, height: image.naturalHeight};
     });
     assert(bitmap.width >= 36 && bitmap.height >= 36, 'Codex icon decodes at adequate DPR2 resolution');
-    assert.equal(await page.$eval('[data-agent-id="gameplay"] .now-task', e => e.getAttribute('href')), '/?codex=fixture-thread');
+    // A card click opens the detail panel without linking to the removed chats tab.
+    await page.click('[data-agent-id="gameplay"] .now-task');
+    assert.equal(await page.$('.now-panel .now-panel-open'), null);
+    assert.equal(await page.$eval('.now-panel-model', e => e.textContent), 'Terra high');
+    assert.equal(await page.$eval('.now-panel-reply', e => e.textContent),
+      'Update\nSkill loaded: dashboard.py\nFixed the header\nKept line breaks\nPreserve snake_case and <script>window.pwned=1</script>');
+    assert.equal(await page.$('.now-panel-reply script'), null, 'Plain text stays inert');
+    await page.keyboard.press('Escape');
+    assert.equal(await page.$eval('.now-panel', e => e.hidden), true);
     assert.equal(await page.$eval('[data-agent-id="gameplay"]', e => e.dataset.parentId), 'atlas');
     assert.equal(await page.$eval('[data-agent-id="gameplay"]', e => e.title), 'Parent link inferred from working directory and launch time');
+    assert.equal(await page.$eval('[data-agent-id="gameplay"] .now-guessed', e => e.hidden), false);
+    assert.equal(await page.$eval('[data-agent-id="atlas"] .now-guessed', e => e.hidden), true);
     assert.equal(await page.title(), 'Murmuratio — Board');
     assert.equal(await page.$eval('html', e => e.lang), 'en');
-    await page.focus('#tab-now'); await page.keyboard.press('ArrowRight');
-    assert.equal(await page.$eval('#tab-codex', e => e.getAttribute('aria-selected')), 'true');
-    await page.keyboard.press('ArrowRight');
-    assert.equal(await page.$eval('#tab-now', e => e.getAttribute('aria-selected')), 'true');
     const value = (id, selector) => page.$eval(`[data-agent-id="${id}"] ${selector}`, e => e.textContent);
     const parts = (id, selector) => page.$$eval(`[data-agent-id="${id}"] ${selector} > span`, es => es.map(e => e.textContent));
     const ids = project => page.$$eval(`[data-project="${project}"] .now-card`, es => es.map(e => e.dataset.agentId));
@@ -86,18 +94,22 @@ const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import
     assert.deepEqual(await parts('gameplay', '.now-time'), ['08:34', '6′']);
     assert.deepEqual(await parts('icons', '.now-time'), ['17:51', '27′']);
     assert.equal(await value('northstar', '.now-time'), '18:09');
-    assert.equal(await value('gameplay', '.now-model'), 'GPT-6.1 Terra');
+    assert.equal(await value('gameplay', '.now-model'), 'Terra high');
     assert.equal(await value('atlas', '.now-model'), 'Opus 5.5');
+    await page.click('[data-agent-id="atlas"] .now-task');
+    assert.equal(await page.$eval('.now-panel-model', e => e.textContent), 'Opus 5.5 effort unknown');
+    await page.keyboard.press('Escape');
+    await page.mouse.move(0, 0);
     for (const [id, percent, level] of [['gameplay', '49%', 'low'], ['inspector', '50%', 'mid'], ['arts', '80%', 'high']]) {
-      // Ring only on every card; the value lives in the label and tooltip.
-      assert.equal(await value(id, '.now-context'), '');
+      // Only high context adds visible text; values come from the API.
+      assert.equal(await value(id, '.now-context'), id === 'arts' ? 'context 80%' : '');
       assert.equal(await page.$eval(`[data-agent-id="${id}"] .now-context`, e => e.getAttribute('aria-label')), `Context window ${percent} used`);
       assert.equal(await page.$eval(`[data-agent-id="${id}"] .now-context`, e => e.dataset.level), level);
     }
     assert.equal(await page.$eval('[data-agent-id="atlas"] .now-context', e => e.hidden), true);
     // Narrow cards may hide footer values; each footer item keeps a hover tooltip that gives them back.
     assert.deepEqual(await page.$$eval('[data-agent-id="gameplay"] .now-footer > *', es => es.map(e => e.hasAttribute('data-tip'))), [true, true, true]);
-    assert.deepEqual(await page.$$eval('#now-summary > span', es => es.map(e => e.textContent)), ['3 running', '0 needs attention', '2 done today']);
+    assert.deepEqual(await page.$$eval('#now-summary > span', es => es.map(e => e.textContent)), ['3 running', '1 needs attention', '2 done today']);
     assert.deepEqual(await page.$$eval('[data-project="Atlas"] .now-counts > span', es => es.map(e => e.textContent)), ['1 running', '1 done']);
     assert.equal(await page.$eval('#now-view', e => /987654|REPORT DUMP|Context|Now/.test(e.textContent)), false);
     assert.equal(await page.$eval('[data-agent-id="atlas"]', e => getComputedStyle(e).boxShadow.includes('1.5px')), false);
@@ -142,7 +154,7 @@ const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import
     // Finished heading shows a dim count; one click hides the list, the next shows it.
     const finishedTitle = '[data-project="Atlas"] .now-finished-title';
     assert.equal(await page.$eval(finishedTitle + ' .now-finished-count', e => e.textContent), '1');
-    await page.click(finishedTitle);
+    // Finished work starts collapsed; a click opens it and the choice is remembered.
     assert.equal(await page.$eval('[data-project="Atlas"] .now-finished .now-items', e => e.hidden), true);
     await page.click(finishedTitle);
     assert.equal(await page.$eval('[data-project="Atlas"] .now-finished .now-items', e => e.hidden), false);
@@ -163,6 +175,11 @@ const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import
       codex: [{window_minutes: 10080, used_percent: 75, resets_at: now + 86400}]},
       routing: {code_to: 'claude', claude: {allowance_per_day: 10, burn_per_day: 20},
         codex: {allowance_per_day: 10, burn_per_day: 0}},
+      health: {limits: {score: 25, reason: 'Claude leaves 65% unused at reset', parts: [
+        {tool: 'claude', score: 25, ratio: 0.35, used_percent: 25, resets_at: now + 2 * 86400},
+        {tool: 'codex', score: 60, ratio: 1.25, used_percent: 95, resets_at: now + 86400, hits_100_at: now + 43200}]},
+        assignments: {score: 67, reason: '1 of 3 against advice', judged: 3, since: now - 86400,
+          wrong: [{id: 'inspector', task: 'Test the board', kind: 'codex', advice: 'claude'}]}},
       forecast: {claude: {start: now - 5 * 86400, resets_at: now + 2 * 86400, used_percent: 25, points: [[now - 86400, 20], [now, 25]],
         pace_per_day: 5, projected_at_reset: 35, hits_100_at: null},
         codex: {start: now - 6 * 86400, resets_at: now + 86400, used_percent: 95, points: [[now, 95]],
@@ -182,6 +199,55 @@ const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import
     assert.equal(fc.height, 500); assert(fc.sameWidth); assert(fc.above);
     assert.match(fc.verdicts[0], /^Claudefits, 35% at reset/); assert.match(fc.verdicts[1], /^Codexlimit .*, then credits$/);
     assert.equal(await page.$eval('.now-credits', e => e.textContent), '60.0kcredits');
+    // Header scores retain the accepted drawn details at desktop/mobile sizes and both themes.
+    assert.equal(await page.$$eval('.now-health-row', es => es.length), 2);
+    assert.equal(await page.$eval('[data-tip-key="health-limits"]', e => e.dataset.level), 'bad');
+    for (const theme of ['light', 'dark']) {
+      await page.emulateMediaFeatures([{name: 'prefers-color-scheme', value: theme}]);
+      for (const [width, deviceScaleFactor] of [[1280, 1], [375, 2]]) {
+        await page.setViewport({width, height: 1000, deviceScaleFactor});
+        for (const key of ['limits', 'assignments']) {
+          await page.hover(`[data-tip-key="health-${key}"]`);
+          await page.waitForSelector(key === 'limits' ? '.now-tip .now-week-track' : '.now-tip .now-workers-track');
+          assert.equal(await page.$$eval('.now-tip-title, .now-tip-note', es => es.length), 0);
+          const bounds = await page.$eval('.now-tip', e => {
+            const r = e.getBoundingClientRect(); return [r.left, r.right, innerWidth];
+          });
+          assert(bounds[0] >= 0 && bounds[1] <= bounds[2], `${key} tooltip fits ${width}px`);
+          if (key === 'limits') {
+            assert.equal(await page.$$eval('.now-tip .now-week-track', es => es.length), 2);
+            assert.equal(await page.$$eval('.now-tip .now-week-full, .now-tip .now-week-pace', es => es.length), 4);
+            assert.equal(await page.$eval('.now-tip .now-week-track', e => getComputedStyle(e).borderRadius), '0px');
+            assert.equal(await page.$eval('.now-tip .now-week-over', e => e.textContent), '125%');
+          } else {
+            assert.equal(await page.$$eval('.now-workers-seg', es => es.length), 3);
+            assert.equal(await page.$$eval('.now-workers-seg.off', es => es.length), 1);
+            assert.match(await page.$eval('.now-workers', e => e.textContent), /Test the board/);
+          }
+          await page.screenshot({path: path.join(artifacts, `health-${key}-${theme}-${width}.png`),
+            clip: {x: 0, y: 0, width, height: 450}});
+        }
+      }
+    }
+    await page.mouse.move(0, 0);
+    await page.setViewport({width: 1280, height: 1000, deviceScaleFactor: 1});
+    await page.emulateMediaFeatures([{name: 'prefers-color-scheme', value: 'light'}]);
+    // Monthly credits with this week's plan, and a full-reset reminder from routing.
+    const plain = payload;
+    payload = {...payload, routing: {...payload.routing, codex_reset_reminder: {expires_at: now + 5 * 86400, available: 2}},
+      credits: {...payload.credits, month_left: 30400, month_ends_at: now + 10 * 86400, week_share_left: 7470,
+        credits_plan: {target_per_week: 7470, spent_this_week: 1200, expected_by_now: 3735, status: 'under'}}};
+    await page.waitForSelector('#now-reminder:not([hidden])');
+    assert.match(await page.$eval('.now-credits', e => e.textContent), /^30\.4kcredits left in \w+this week 1\.2k of 7\.5k, under plan$/);
+    assert.equal(await page.$eval('.now-credits-plan', e => e.dataset.status), 'under');
+    assert.match(await page.$eval('#now-reminder', e => e.textContent), /^Use a Codex full reset: the week is at 100% with 3 or more days to go\. Start it in the Codex app before \d+ \w+, \d\d:\d\d, 2 available\.$/);
+    for (const theme of ['light', 'dark']) {
+      await page.emulateMediaFeatures([{name: 'prefers-color-scheme', value: theme}]);
+      await page.screenshot({path: path.join(artifacts, `credits-plan-${theme}.png`), clip: {x: 0, y: 0, width: 1280, height: 160}});
+    }
+    await page.emulateMediaFeatures([{name: 'prefers-color-scheme', value: 'light'}]);
+    payload = plain;
+    await page.waitForFunction(() => document.getElementById('now-reminder').hidden);
     assert.equal(fc.lines, 2); assert.equal(fc.projected, 2);
     assert.equal(await page.$$eval('.now-forecast-chart .reset', es => es.length), 2);
     assert.equal(await page.$$eval('.now-forecast-chart .reset-mark', es => es.length), 2);
@@ -233,13 +299,13 @@ const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import
     await page.waitForSelector('.now-forecast-chart .reset');
     assert.deepEqual(await page.$$eval('.now-card.need', es => es.map(e => e.dataset.agentId)), ['atlas', 'extra']);
     assert.equal(await value('extra', '.now-word'), 'Blocked');
-    assert.match(await page.$eval('#now-summary', e => e.textContent), /2 needs attention/);
+    assert.match(await page.$eval('#now-summary', e => e.textContent), /3 needs attention/);
     assert.equal(await page.$eval('[data-agent-id="atlas"]', e => getComputedStyle(e).boxShadow.includes('1.5px')), true);
     assert.equal(await page.$$eval('.now-gauge-logo', es => es.length), 2, 'One logo per tool');
-    assert.deepEqual(await page.$$eval('.now-gauge[data-tool="claude"] .now-gauge-win', es => es.map(e => e.textContent)), ['5h', 'week']);
+    assert.deepEqual(await page.$$eval('.now-gauge[data-tool="claude"] .now-gauge-win', es => es.map(e => e.textContent)), ['5h 80%', 'week 25%']);
     assert.equal(await page.$eval('.now-gauge-pct', e => e.textContent), '80%');
     assert(await page.$$eval('.now-gauge-pct', es => es.every(e => getComputedStyle(e).display === 'none')));
-    assert.deepEqual(await page.$$eval('.now-gauge-reset', es => es.map(e => e.textContent)), ['1h', '2d ↑', '24h']);
+    assert.deepEqual(await page.$$eval('.now-gauge-reset', es => es.map(e => e.textContent)), ['58m', '2d ↑', '24h']);
     // Tooltips: the first waits, the next one shows at once.
     await page.hover('.now-gauge[data-tool="claude"] .now-gauge-wrap');
     assert.equal(await page.$eval('.now-tip', e => e.hidden), true);
@@ -296,16 +362,25 @@ const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import
     await page.screenshot({path: path.join(artifacts, 'final-rings-light.png'), fullPage: true});
     await page.emulateMediaFeatures([{name: 'prefers-color-scheme', value: 'dark'}]);
     await page.screenshot({path: path.join(artifacts, 'final-rings-dark.png'), fullPage: true});
-    for (const width of [390, 320]) {
+    for (const width of [375, 390, 430, 320]) {
       await page.setViewport({width, height: 1000, deviceScaleFactor: 2});
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${width}px header rings reflow`);
+      assert(await page.evaluate(() => {
+        const title = document.querySelector('#page-title').getBoundingClientRect();
+        return [...document.querySelectorAll('.now-tool, .source-tabs')].filter(e => !e.hidden).every(e => {
+          const r = e.getBoundingClientRect();
+          return r.right <= title.left || r.left >= title.right || r.bottom <= title.top || r.top >= title.bottom;
+        });
+      }), `${width}px header controls do not overlap the title`);
     }
     await page.screenshot({path: path.join(artifacts, 'final-rings-narrow.png'), fullPage: true});
     await page.setViewport({width: 1280, height: 1000, deviceScaleFactor: 1});
 
     // The finished card leaves at exactly 30 minutes; today's done count remains.
     payload = {...payload, now: now + 120 + 1799, limits: {}};
-    await page.waitForFunction(() => !document.querySelector('.now-gauge'));
+    await page.waitForFunction(() => !document.querySelector('.now-gauge-ring'));
+    assert.deepEqual(await page.$$eval('.now-gauge', es => es.map(e => e.textContent)),
+      ['Claudelimits unavailable', 'Codexlimits unavailable']);
     assert(await page.$('[data-agent-id="gameplay"]'));
     payload = {...payload, now: now + 120 + 1800};
     await page.waitForFunction(() => !document.querySelector('[data-agent-id="gameplay"]'));
@@ -355,6 +430,14 @@ const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import
     assert.equal(await page.$eval('[data-agent-id="nested"]', e => e.style.marginInlineStart), '42px');
     payload = beforeAncestors;
     await page.waitForFunction(() => !document.querySelector('[data-project="Retention"]'));
+    // The API retains a CLI parent after its today-finished child has left the response.
+    const cliParent = item('cli-parent', 'CLI parent', {status: 'done', ended: now - 3600,
+      has_eligible_children: true});
+    payload = {...payload, agents: [...payload.agents, cliParent]};
+    await page.waitForSelector('[data-agent-id="cli-parent"]');
+    assert.deepEqual(await ids('CLI parent'), ['cli-parent']);
+    payload = beforeAncestors;
+    await page.waitForFunction(() => !document.querySelector('[data-project="CLI parent"]'));
     const retainedCount = await page.$$eval('.now-card', es => es.length);
     fail = true;
     await page.waitForSelector('#now-error:not([hidden])');
@@ -368,7 +451,7 @@ const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import
       throw error;
     });
     assert.equal(await page.$$eval('.now-card', es => es.length), 0, 'Cards omitted by the server leave the board');
-    assert.equal(await page.$eval('.now-empty', e => e.textContent), 'Murmuratio reads local Claude Code and Codex sessions. None were found.');
+    assert.equal(await page.$eval('.now-empty', e => e.textContent), 'Your Claude Code and Codex chats appear on the board once they start agents.');
     assert.equal(await page.$eval('.now-empty', e => e.hidden), false);
     for (const [width, dpr] of [[1280, 1], [390, 2]]) {
       await page.setViewport({width, height: 1000, deviceScaleFactor: dpr});
@@ -385,21 +468,6 @@ const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import
     payload = {...payload, now: now + 1};
     await page.waitForFunction(() => !document.querySelector('[data-agent-id="standalone"]'));
     assert.match(await page.$eval('#now-summary', e => e.textContent), /1 done today/);
-    // A Codex-app-only user sees one quiet count, with no project or false empty-state copy.
-    payload = {now, agents: [], completed: [], codex_chats: {hidden: 3, running: 2}};
-    await page.waitForFunction(() => document.querySelector('#now-summary').textContent.includes('Your Codex chats: 2'));
-    assert.equal(await page.$$eval('.now-project', es => es.length), 0);
-    assert.equal(await page.$eval('.now-empty', e => e.hidden), true);
-    for (const theme of ['light', 'dark']) {
-      await page.emulateMediaFeatures([{name: 'prefers-color-scheme', value: theme}]);
-      for (const [width, dpr] of [[1280, 1], [375, 2]]) {
-        await page.setViewport({width, height: 1000, deviceScaleFactor: dpr});
-        assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${width}px chat count reflows`);
-        await page.screenshot({path: path.join(artifacts, `codex-chat-count-${theme}-${width}.png`), fullPage: true});
-      }
-    }
-    payload = {...payload, codex_chats: {hidden: 3, running: 0}};
-    await page.waitForFunction(() => !document.querySelector('#now-summary').textContent.includes('Your Codex chats:'));
     const stopped = ['waiting', 'idle', 'blocked', 'hung', 'crashed'].map(status => item(status, 'Working time', {
       kind: 'codex', status, started: at(8, 0), last_at: now - 60, seconds: 125}));
     payload = {now, agents: stopped, completed: []};
@@ -419,7 +487,31 @@ const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import
     assert.deepEqual(await parts('unknown', '.now-time'), ['18:00'], 'T1 unknown duration is omitted');
     assert.match(await value('quiet', '.now-current'), /Quiet/, 'S1 quiet work is labelled');
     assert.equal(await page.$eval('[data-agent-id="quiet"] .now-current', e => getComputedStyle(e).display !== 'none' && e.getBoundingClientRect().width > 0), true);
-    assert.match(await page.$eval('[data-tool="codex"]', e => e.textContent), /week, 36m old/, 'R4 stale quota keeps its value with its age');
+    // Brief asks must never override the card's state; both surfaces share labels and dot styles.
+    await page.mouse.move(0, 0);
+    quiet.brief = {asks: ['approval'], reply: '**Still working**'};
+    payload = {...payload, agents: [unknown, quiet, ...stopped]};
+    await page.waitForSelector('[data-agent-id="blocked"]');
+    // Crashed cards live in Finished, which is collapsed by default.
+    const finishedHeading = '[data-project="Working time"] .now-finished-title';
+    assert.equal(await page.$eval(finishedHeading, e => e.getAttribute('aria-expanded')), 'false');
+    assert.equal(await page.$eval('[data-agent-id="crashed"]', e => Boolean(e.closest('[hidden]'))), true);
+    await page.click(finishedHeading);
+    await page.waitForSelector('[data-agent-id="crashed"] .now-task', {visible: true});
+    for (const agent of [quiet, unknown, ...stopped]) {
+      await page.click(`[data-agent-id="${agent.id}"] .now-task`);
+      const states = await page.evaluate(id => {
+        const read = root => {
+          const dot = getComputedStyle(root.querySelector('.now-dot'));
+          return {labels: [...root.querySelectorAll('.now-word, .now-current')].map(e => e.textContent),
+            visible: root.querySelector('.now-action').innerText, color: dot.backgroundColor, ring: dot.boxShadow};
+        };
+        return [read(document.querySelector(`[data-agent-id="${id}"] .now-status`)), read(document.querySelector('.now-panel-state'))];
+      }, agent.id);
+      assert.deepEqual(states[1], states[0], `${agent.id} panel matches its card`);
+      await page.keyboard.press('Escape');
+    }
+    assert.match(await page.$eval('[data-tool="codex"]', e => e.textContent), /week 12%, 36m old/, 'R4 stale quota keeps its value with its age');
     assert.match(await page.$eval('[data-tool="codex"]', e => e.getAttribute('aria-label')), /12% used, last known 36m ago/);
     assert.match(await page.$eval('[data-tool="claude"]', e => e.textContent), /stale/i, 'R4 stale fallback is labelled');
     assert.match(await page.$eval('#now-error', e => e.textContent), /Codex session logs can't be read: permission denied/);
@@ -433,6 +525,7 @@ const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import
     }
 
     // R3: a failing source cannot be mistaken for an empty board.
+    await page.mouse.move(0, 0);  // Leave the board so reading pause does not hold the next snapshot.
     payload = {now, agents: [], completed: [], sources: {codex_sessions: {status: 'unsupported'}}};
     await page.waitForFunction(() => !document.querySelector('#now-error').hidden && /format not recognized/i.test(document.querySelector('#now-error').textContent));
     assert.equal(await page.$eval('.now-empty', e => e.hidden), true, 'R3 source problem is not an empty board');
@@ -449,6 +542,7 @@ const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import
     assert.match(await page.$eval('#now-summary', e => e.textContent), /0 done today/, 'T2 day uses server calendar');
 
     // R8: paused rendering and a disconnected server are both visible, then recover to the newest snapshot.
+    await page.click('[data-project="Calendar"] .now-finished-title');  // finished work starts collapsed
     await page.hover('[data-agent-id="midnight"]');
     payload = {...payload, agents: [item('latest', 'Calendar')], completed: []};
     await page.waitForFunction(() => /paused/i.test(document.querySelector('#now-error').textContent) && !document.querySelector('#now-error').hidden, {timeout: 16000});
@@ -461,6 +555,7 @@ const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import
     await page.waitForSelector('[data-agent-id="latest"]');
     await page.waitForSelector('#now-error[hidden]');
     assert.deepEqual(errors, []);
+    await require('./browser_any_hour_test.cjs')(browser);
     console.log('Final Board browser checks passed: fixture project parents, SVG tree elbows, exact time strings, stable ordering, in-place completion and source removal, pointer + selection pause/latest queue, English UI, no report/context dumps, safe text, Codex links, keyboard tabs, 1280/780/390/320px DPR1/2, 125% scale, light/dark, reduced motion, reconnect.');
   } finally {
     if (browser) await closeBrowser(browser);

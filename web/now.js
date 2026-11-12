@@ -1,10 +1,45 @@
 'use strict';
+const BOARD_REFRESH_MS = 3000;
+function sessionTitleDisplay(title = '') {
+  return title.replace(/^↳ */, '→ ');
+}
+
+function codexCreditDisplay(credit) {
+  const month = Number.isFinite(credit.month_left), reserved = Number.isFinite(credit.reserved_until);
+  const monthName = (month || reserved) && new Date((reserved ? credit.reserved_until : credit.month_ends_at - 1) * 1000)
+    .toLocaleDateString('en-GB', {month: 'long'});
+  return {month, reserved, monthName, value: reserved || !month ? credit.balance : credit.month_left,
+    label: reserved ? `credits for ${monthName}` : month ? `credits left in ${monthName}` : 'credits'};
+}
+
+function modelLabel(agent, detail = false) {
+  const raw = typeof agent.model === 'string' ? agent.model.trim() : '';
+  let label = raw || 'model unknown';
+  const claude = raw.replace(/^claude-/, '').replace(/-(?:\d{8}|latest)$/, '')
+    .match(/^(opus|sonnet|haiku|fable)(?:-(\d+(?:[-.]\d+)*))?$/i);
+  const codex = raw.match(/^gpt-\d+(?:\.\d+)*-(sol|terra|luna|astra)$/i);
+  if (claude) label = claude[1][0].toUpperCase() + claude[1].slice(1) + (claude[2] ? ' ' + claude[2].replace(/-/g, '.') : '');
+  else if (codex) label = codex[1][0].toUpperCase() + codex[1].slice(1);
+  const effort = typeof agent.effort === 'string' ? agent.effort.trim() : '';
+  return label + (effort ? ' ' + effort : detail ? ' effort unknown' : '');
+}
+
 window.createNowView = ({node, text}) => {
   const board = document.getElementById('now-board');
   const summary = document.getElementById('now-summary');
   const limitsEl = document.getElementById('now-limits');
   const error = document.getElementById('now-error');
-  const empty = node('p', 'now-empty', 'Murmuratio reads local Claude Code and Codex sessions. None were found.');
+  const freshness = document.getElementById('now-freshness');
+  const calculatorLink = document.querySelector('a[href="/calculator"]');
+  let snapshotAt = null;
+  function showFreshness() {
+    if (!freshness) return;
+    const age = Number.isFinite(snapshotAt) ? Math.max(0, Date.now() / 1000 - snapshotAt) : 0;
+    freshness.hidden = age <= 2 * BOARD_REFRESH_MS / 1000;
+    text(freshness, freshness.hidden ? '' : `Data is ${Math.floor(age / 60)} min old`);
+  }
+  setInterval(showFreshness, BOARD_REFRESH_MS);
+  const empty = node('p', 'now-empty', 'Your Claude Code and Codex chats appear on the board once they start agents.');
   empty.hidden = true; board.append(empty);
   const groups = new Map(), cards = new Map();
   // An approval request needs the owner even when it comes from a worker.
@@ -27,10 +62,6 @@ window.createNowView = ({node, text}) => {
     }
     return [clock(agent.started), ...(Number.isFinite(agent.seconds) ? [minutes(agent.seconds)] : [])];
   }
-  function modelLabel(agent) {
-    if (agent.kind === 'claude') return (agent.who || 'Claude').replace(/^Claude\s*/, '') || 'Claude';
-    return (agent.model || 'Codex').replace(/^gpt-/, 'GPT-').replace(/-(sol|terra|luna|astra)$/i, (_, tier) => ' ' + tier[0].toUpperCase() + tier.slice(1));
-  }
   function statusText(agent) {
     switch (agent.status) {
       case 'working': return ['Running', agent.quiet ? ['Quiet', agent.current_action].filter(Boolean).join(' ') : agent.current_action];
@@ -43,15 +74,23 @@ window.createNowView = ({node, text}) => {
       default: return ['Unknown'];
     }
   }
+  function paintStatus(status, action, agent) {
+    const [word, detail] = statusText(agent);
+    status.dataset.status = agent.status;
+    status.classList.toggle('quiet', agent.status === 'working' && Boolean(agent.quiet));
+    action.replaceChildren(node('span', 'now-word', word), ...(detail ? [node('span', 'now-current', detail)] : []));
+    return [word, detail];
+  }
   function limitState(window, now) {
     const percent = Math.max(0, Math.min(100, Math.round(window.used_percent)));
     const span = (window.window_minutes || 0) * 60;
     const left = Number.isFinite(window.resets_at) ? Math.max(0, window.resets_at - now) : null;
-    const elapsed = span && left !== null ? Math.min(1, Math.max(0.01, 1 - left / span)) : null;
-    const pace = elapsed ? percent / 100 / elapsed : 0;
+    const elapsed = span && left !== null ? Math.min(1, Math.max(0, 1 - left / span)) : null;
+    const pace = elapsed ? percent / 100 / Math.max(3600 / span, elapsed) : 0;
     const level = percent >= 75 || (percent >= 40 && pace >= 1.3) ? 'crit'
       : percent >= 50 || pace > 1.05 ? 'warn' : 'ok';
-    const reset = left === null ? '' : left >= 86400 ? `${Math.round(left / 86400)}d` : `${Math.round(left / 3600)}h`;
+    const reset = left === null ? 'reset unknown' : left === 0 ? 'reset passed' : left < 3600
+      ? `${Math.ceil(left / 60)}m` : left >= 86400 ? `${Math.round(left / 86400)}d` : `${Math.round(left / 3600)}h`;
     return {percent, elapsed, level, reset};
   }
   function limitRing(window, state) {
@@ -114,8 +153,9 @@ window.createNowView = ({node, text}) => {
     tipEl.style.left = Math.max(10, Math.min(innerWidth - w - 10, r.left + r.width / 2 - w / 2)) + 'px';
     tipEl.style.top = (r.bottom + 10) + 'px';
   }
-  function fillTip({title, note, rows = []}) {
-    const parts = [node('div', 'now-tip-title', title)];
+  function fillTip({title, note, rows = [], body}) {
+    const parts = title ? [node('div', 'now-tip-title', title)] : [];
+    if (body) parts.push(...body());
     if (note) parts.push(node('div', 'now-tip-note', note));
     if (rows.length) {
       const grid = node('div', 'now-tip-rows');
@@ -141,12 +181,92 @@ window.createNowView = ({node, text}) => {
     });
   }
   addEventListener('scroll', hideTip, {passive: true});
+  // Two bars: limits spending and agent assignments. Green means nothing to look at; details live in the tooltip.
+  // One week at a glance: used, forecast to reset, where even pace would be now, and the 100% line.
+  function weekBar(p, now, lvl) {
+    const box = node('div', 'now-week'); box.dataset.level = lvl;
+    const used = p.used_percent, projected = Number.isFinite(p.ratio) ? p.ratio * 100 : null;
+    const scale = Math.min(150, Math.max(100, projected || 0, used || 0));
+    const at = v => (Math.max(0, Math.min(scale, v)) / scale * 100) + '%';
+    const head = node('div', 'now-week-head');
+    const nums = node('span', 'now-week-nums', used === null || used === undefined ? 'no data' : `${Math.round(used)}% now`);
+    if (used !== null && used !== undefined && projected !== null) {
+      nums.append(', ', node('span', projected > 105 ? 'now-week-over' : '', `${Math.round(projected)}%`), ' by reset');
+    }
+    head.append(node('span', 'now-week-name', toolName(p.tool)), nums);
+    const track = node('div', 'now-week-track');
+    if (projected !== null && used !== null) {
+      const ahead = node('span', 'now-week-forecast'); ahead.style.left = at(used); ahead.style.width = `calc(${at(projected)} - ${at(used)})`;
+      track.append(ahead);
+    }
+    const fill = node('span', 'now-week-used'); fill.style.width = at(used || 0); track.append(fill);
+    const full = node('span', 'now-week-full'); full.style.left = at(100); track.append(full);
+    if (Number.isFinite(p.resets_at)) {
+      const pace = Math.max(0, Math.min(100, (now - (p.resets_at - 7 * 86400)) / (7 * 86400) * 100));
+      const tick = node('span', 'now-week-pace'); tick.style.left = at(pace); track.append(tick);
+    }
+    const foot = node('div', 'now-week-foot');
+    const out = projected > 105 && Number.isFinite(p.hits_100_at) && p.hits_100_at < (p.resets_at || Infinity);
+    foot.append(node('span', out ? 'now-week-out' : '', out ? `runs out ${when(p.hits_100_at)}` : ''),
+      node('span', '', Number.isFinite(p.resets_at) ? `resets ${when(p.resets_at)}` : ''));
+    box.append(head, track, foot);
+    return box;
+  }
+  // Workers of the last day as segments: green by advice, coloured against it; offenders listed below.
+  function workersBar(assign, lvl) {
+    const box = node('div', 'now-week now-workers'); box.dataset.level = lvl;
+    const judged = assign?.judged || 0, wrong = assign?.wrong || [];
+    const head = node('div', 'now-week-head');
+    const nums = node('span', 'now-week-nums', judged ? `${judged - wrong.length} of ${judged} by advice`
+      : Number.isFinite(assign?.since) ? `none since ${when(assign.since)}` : 'no data');
+    head.append(node('span', 'now-week-name', 'Workers'), nums);
+    const track = node('div', 'now-workers-track');
+    for (let i = 0; i < judged; i++) track.append(node('span', i >= judged - wrong.length ? 'now-workers-seg off' : 'now-workers-seg'));
+    box.append(head, track);
+    for (const w of wrong.slice(0, 6)) {
+      const row = node('div', 'now-week-foot');
+      row.append(node('span', 'now-workers-task', w.task), node('span', 'now-week-over', `${toolName(w.kind)}, not ${toolName(w.advice)}`));
+      box.append(row);
+    }
+    if (wrong.length > 6) box.append(node('div', 'now-week-foot', `${wrong.length - 6} more`));
+    return box;
+  }
+  function healthBars(health, now) {
+    const wrap = node('span', 'now-health');
+    const level = score => score === null || score === undefined ? 'none' : score < 35 ? 'bad' : score < 70 ? 'warn' : 'ok';
+    const bar = (key, name, part, content) => {
+      const row = node('span', 'now-health-row'); row.dataset.level = level(part?.score); row.dataset.tipKey = 'health-' + key;
+      const track = node('span', 'now-health-track'), fill = node('span', 'now-health-fill');
+      fill.style.width = Math.max(0, Math.min(100, part?.score ?? 0)) + '%'; track.append(fill);
+      row.append(node('span', 'now-health-name', name), track);
+      row.setAttribute('aria-label', `${name}: ${part?.reason || 'unknown'}`);
+      tip(row, content); wrap.append(row);
+    };
+    const limits = health.limits;
+    bar('limits', 'Limits', limits, {body: () => (limits?.parts || []).map(p => weekBar(p, now, level(p.score)))});
+    const assign = health.assignments;
+    bar('assignments', 'Agents', assign, {body: () => [workersBar(assign, level(assign?.score))]});
+    return wrap;
+  }
   function renderLimits(data) {
     const activeKey = tipTarget?.dataset.tipKey;
     limitsEl.replaceChildren();
     const routing = modules.routing ? data.routing : null;
+    if (routing && data.health) limitsEl.append(healthBars(data.health, data.now));
     for (const kind of ['claude', 'codex']) {
+      const present = [...(data.agents || []), ...(data.completed || [])].some(a => a.kind === kind)
+        || (data.limits?.[kind] || []).length
+        || Object.entries(data.sources || {}).some(([name, source]) => name.startsWith(kind + '_') && source.status !== 'absent');
+      if (!present) continue;
       const windows = [...(data.limits?.[kind] || [])].sort((a, b) => a.window_minutes - b.window_minutes);
+      if (!windows.length) {
+        const item = node('span', 'now-gauge'); item.dataset.tool = kind;
+        item.setAttribute('aria-label', `${toolName(kind)} limits unavailable`);
+        const label = node('span', 'now-gauge-label');
+        label.append(node('span', 'now-gauge-win', toolName(kind)), node('span', 'now-gauge-reset', 'limits unavailable'));
+        item.append(label);
+        limitsEl.append(item);
+      }
       for (const [index, window] of windows.entries()) {
         const state = limitState(window, data.now), item = node('span', 'now-gauge');
         item.dataset.tool = kind; item.dataset.level = state.level;
@@ -158,7 +278,7 @@ window.createNowView = ({node, text}) => {
         const label = node('span', 'now-gauge-label');
         const name = kind === 'claude' ? 'Claude' : 'Codex', week = window.window_minutes >= 10080;
         const span = week ? 'week' : Math.round(window.window_minutes / 60) + '-hour';
-        const win = node('span', 'now-gauge-win', (week ? 'week' : Math.round(window.window_minutes / 60) + 'h') + staleText);
+        const win = node('span', 'now-gauge-win', (week ? 'week' : Math.round(window.window_minutes / 60) + 'h') + ` ${state.percent}%` + staleText);
         if (stale) win.dataset.stale = 'true';
         tip(win, stale ? {title: `${name} ${span} window, last known value`, note: old
           ? `Sampled ${old} ago. ${name} reports limits only while it works.` : 'The sample age is unknown.'}
@@ -190,27 +310,47 @@ window.createNowView = ({node, text}) => {
     const credit = modules.codex_credits ? data.credits : null;
     if (credit && Number.isFinite(credit.balance)) {
       const short = v => v >= 1000 ? (v / 1000).toFixed(1) + 'k' : String(Math.round(v));
-      // With routing, the balance is split by month. Credits are spent only once the Codex week
-      // is at 100%; only then does the label add this week's share left.
-      const month = Number.isFinite(credit.month_left), item = node('span', 'now-credits');
-      const monthName = month && new Date((credit.month_ends_at - 1) * 1000).toLocaleDateString('en-GB', {month: 'long'});
+      // The reserved balance and this month's spending allowance are separate values.
+      const {month, reserved, monthName, value: displayed, label} = codexCreditDisplay(credit);
+      const item = node('span', 'now-credits');
       const codexWeek = (data.limits?.codex || []).find(w => w.window_minutes >= 10080);
-      const spending = month && codexWeek?.used_percent >= 100 && Number.isFinite(credit.week_share_left);
-      const value = node('span', 'now-credits-value', short(month ? credit.month_left : credit.balance));
-      item.append(value, node('span', 'now-credits-label', month
-        ? `credits left in ${monthName}` + (spending ? `, spending credits: ${short(credit.week_share_left)} left this week` : '')
-        : 'credits'));
+      const spending = month && !reserved && codexWeek?.used_percent >= 100 && Number.isFinite(credit.week_share_left);
+      const value = node('span', 'now-credits-value', short(displayed));
+      item.append(value, node('span', 'now-credits-label', label
+        + (spending ? `, spending credits: ${short(credit.week_share_left)} left this week` : '')));
       if (spending) item.dataset.spending = 'true';
-      tip(item, {title: 'Codex credits', note: month ? `Spent only after the weekly limit hits 100%. This month's part is due by the end of ${monthName}.`
+      // Credit spend against its prorated weekly budget, independent of quota use.
+      const plan = month ? credit.credits_plan : null;
+      if (plan) {
+        const line = node('span', 'now-credits-plan', `this week ${short(plan.spent_this_week)} of ${short(plan.target_per_week)}, ${plan.status} plan`);
+        line.dataset.status = plan.status; item.append(line);
+      }
+      const number = v => Math.round(v).toLocaleString('en-US');
+      tip(item, {title: 'Codex credits', note: reserved ? `Reserved for ${monthName}. This month's credit plan is 0.`
+        : month ? `Spent only after the weekly limit hits 100%. This month's part is due by the end of ${monthName}.`
         : 'Spent only after the weekly limit hits 100%',
-        rows: [...(month ? [[`Left in ${monthName}`, Math.round(credit.month_left).toLocaleString('en-US')],
+        rows: [...(plan ? [['Week plan', number(plan.target_per_week)], ['Spent this week', number(plan.spent_this_week)],
+          ['Expected by now', number(plan.expected_by_now)], ['Against plan', plan.status]] : []),
+          ...(month ? [[reserved ? `Reserved for ${monthName}` : `Left in ${monthName}`, number(displayed)],
           ...(Number.isFinite(credit.week_share_left) ? [['This week\'s share left', Math.round(credit.week_share_left).toLocaleString('en-US')]] : [])] : []),
           ['Balance', Math.round(credit.balance).toLocaleString('en-US')],
           ...(credit.per_hour ? [['Spend', `about ${Math.round(credit.per_hour)} an hour of work`], ['Lasts', `about ${Math.round(credit.balance / credit.per_hour)} work hours`],
             ['Measured on', `${Math.round(credit.sample_hours * 60)} min of use`]] : [])]});
       item.dataset.tipKey = 'codex-credits';
       limitsEl.append(item);
+    } else if (modules.codex_credits) {
+      limitsEl.append(node('span', 'now-credits', 'Codex credits unavailable'));
     }
+    // A reminder only: the full reset itself is started in the Codex app.
+    const reminder = routing?.codex_reset_reminder, reminderEl = document.getElementById('now-reminder');
+    const remind = Boolean(reminderEl && reminder && Number.isFinite(reminder.expires_at));
+    if (remind) {
+      const expires = new Date(reminder.expires_at * 1000).toLocaleString('en-GB', {day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'});
+      const more = reminder.available > 1 ? `, ${reminder.available} available` : '';
+      text(reminderEl, `Use a Codex full reset: the week is at 100% with 3 or more days to go. ` +
+        `Start it in the Codex app before ${expires}${more}.`);
+    }
+    if (reminderEl) reminderEl.hidden = !remind;
     // A live refresh replaces the nodes; keep an open tooltip on the same item.
     const again = activeKey && limitsEl.querySelector(`[data-tip-key="${activeKey}"]`);
     if (again) showTip(again); else if (activeKey) hideTip();
@@ -260,9 +400,13 @@ window.createNowView = ({node, text}) => {
     }
     out.push(b); return out;
   }
-  const baseRate = (f, now) => { const h = workHours(f.start, now); return h >= 3 ? f.used_percent / h : null; };
+  const baseRate = (f, now) => {
+    if (Number.isFinite(f.rate_per_hour)) return f.rate_per_hour;
+    const h = workHours(f.start, now);
+    return h >= 3 ? f.used_percent / h : Number.isFinite(f.pace_per_day) ? f.pace_per_day / WORK_DAY : 100 / 7 / WORK_DAY;
+  };
   function verdict(f) {
-    if (!Number.isFinite(f.pace_per_day)) return {text: 'not enough data yet', level: 'ok'};
+    if (!f || !Number.isFinite(f.pace_per_day)) return {text: 'limits unavailable', level: 'ok'};
     if (Number.isFinite(f.hits_100_at) && f.cap > 100) {
       return Number.isFinite(f.credits_out_at)
         ? {text: `limit ${when(f.hits_100_at)}, credits out ${when(f.credits_out_at)}`, level: 'crit'}
@@ -281,7 +425,7 @@ window.createNowView = ({node, text}) => {
   function project(f, rate, now) {
     if (!Number.isFinite(rate)) return {...f, rate: null, pace_per_day: null, projected_at_reset: null, hits_100_at: null};
     const projected = f.used_percent + rate * workHours(now, f.resets_at);
-    const hits = projected > 100 && rate > 0 ? addWorkHours(now, (100 - f.used_percent) / rate) : null;
+    const hits = f.used_percent >= 100 ? now : projected > 100 && rate > 0 ? addWorkHours(now, (100 - f.used_percent) / rate) : null;
     // Codex credits extend the week past 100%: `cap` is 100% plus what the balance buys, in weekly %.
     const cap = f.cap || 100;
     const out = projected > cap && rate > 0 && cap > 100 ? addWorkHours(now, (cap - f.used_percent) / rate) : null;
@@ -320,13 +464,17 @@ window.createNowView = ({node, text}) => {
       out.push(['Best split result', [[w <= 100 ? `both fit, fuller at ${w}%` : `short by ${w - 100}%`]], 'With the best split, the fuller tool ends at this % of its capacity']);
     }
     const cr = modules.codex_credits ? forecast.codex?.credits : null;
-    if (cr && forecast.codex.cap > 100) out.push(['Codex credits', [[`${Math.round(cr.balance).toLocaleString('en-US')}, ~${Math.round(cr.balance / cr.per_hour)} hours`, 'codex']], 'Used only after the weekly limit hits 100%']);
+    if (cr && forecast.codex.cap > 100) {
+      const rate = baseRate(forecast.codex, now), cpp = forecast.codex.credits_per_percent;
+      const hours = Number.isFinite(cpp) && rate > 0 ? cr.balance / cpp / rate : cr.per_hour > 0 ? cr.balance / cr.per_hour : null;
+      out.push(['Codex credits', [[`${Math.round(cr.balance).toLocaleString('en-US')}` + (hours !== null ? `, ~${Math.round(hours)} hours` : ''), 'codex']], 'Used only after the weekly limit hits 100% at the forecast pace']);
+    }
     if (p && p.movable < 1) out.push(['Claude use', [[`chats ${pct(1 - p.movable)}, tasks ${pct(p.movable)}`, 'claude']], 'Chats: orchestrators and your own chats, they stay on Claude. Tasks: worker sessions, they can move to Codex']);
     const budget = ['claude', 'codex'].filter(t => forecast[t] && workHours(now, forecast[t].resets_at) > 0)
       .map(t => [`${Math.round((100 - forecast[t].used_percent) / workHours(now, forecast[t].resets_at) * WORK_DAY)}%/day`, t]);
     if (budget.length) out.push(['To last until reset', budget, 'Most each tool can spend per work day and still last to its reset']);
     out.push(['Work hours', [[`${WORK[0]}:00–${WORK[1]}:00`]], 'Usage is expected only in these hours; nights stay flat']);
-    return {view, rows: out};
+    return {view, rows: out, scenarios: Boolean(p)};
   }
   // The block has two views: the weekly forecast and the burn rate by model.
   let blockView = 'forecast', burnPeriod = 'today', burnData = {};
@@ -350,7 +498,8 @@ window.createNowView = ({node, text}) => {
     [/terra/i, 'Terra', 'terra'], [/sol/i, 'Sol', 'sol'], [/luna/i, 'Luna', 'luna']];
   const family = model => MODELS.find(([re]) => re.test(model)) || [null, 'Other', 'other'];
   function renderBurn(now) {
-    const tools = ['claude', 'codex'].filter(t => burnData[t]?.hours?.length);
+    const tools = ['claude', 'codex'].filter(t => burnData[t]);
+    forecastEl.classList.toggle('empty', !tools.length);
     const head = node('div', 'now-forecast-head'), top = node('div', 'now-forecast-top'), bottom = node('div', 'now-forecast-bottom');
     const title = node('p', 'now-forecast-verdict');
     title.append(node('b', '', 'Weekly limit spent per ' + (burnPeriod === 'today' ? 'hour, today' : 'day, this week')));
@@ -409,6 +558,7 @@ window.createNowView = ({node, text}) => {
       };
       const Y = v => pad.t + (1 - v / top) * (H - pad.t - pad.b), slot = (W - pad.l - pad.r) / edges.length;
       add('text', {x: pad.l, y: 15, class: 'label'}).textContent = toolName(tool);
+      if (!totals.some(v => v > 0)) add('text', {x: pad.l + 10, y: pad.t + 20, class: 'label'}).textContent = 'No usage recorded this week yet';
       for (let v = 0; v <= top; v += step) {
         add('line', {x1: pad.l, x2: W - pad.r, y1: Y(v), y2: Y(v), class: 'grid'});
         add('text', {x: pad.l - 10, y: Y(v) + 4, class: 'axis', 'text-anchor': 'end'}).textContent = (step < 1 ? v.toFixed(1) : v) + '%';
@@ -441,13 +591,13 @@ window.createNowView = ({node, text}) => {
       }
       charts.append(svg);
     }
-    if (!tools.length) charts.append(node('p', 'now-burn-note', 'No usage recorded this week yet'));
+    if (!tools.length) charts.append(node('p', 'now-burn-note now-burn-empty', 'No usage recorded this week yet'));
     forecastEl.append(charts);
   }
   // Charts can be put away from the header; the choice stays in this browser.
   const chartsToggle = document.getElementById('charts-toggle');
-  let chartsOn = true, forecastArgs = null;
-  try { chartsOn = localStorage.getItem('now-charts') !== 'off'; } catch {}
+  let chartsOn = false, forecastArgs = null;
+  try { chartsOn = localStorage.getItem('now-charts') === 'on'; } catch {}
   function paintChartsToggle() {
     chartsToggle.setAttribute('aria-pressed', String(chartsOn));
     chartsToggle.title = chartsOn ? 'Hide charts' : 'Show charts';
@@ -455,7 +605,7 @@ window.createNowView = ({node, text}) => {
   paintChartsToggle();
   chartsToggle.addEventListener('click', () => {
     chartsOn = !chartsOn; paintChartsToggle();
-    try { if (chartsOn) localStorage.removeItem('now-charts'); else localStorage.setItem('now-charts', 'off'); } catch {}
+    try { localStorage.setItem('now-charts', chartsOn ? 'on' : 'off'); } catch {}
     forecastKey = '';
     if (chartsOn && forecastArgs) renderForecast(...forecastArgs);
     animateCharts(chartsOn);
@@ -487,25 +637,30 @@ window.createNowView = ({node, text}) => {
   const narrowChart = () => forecastEl.clientWidth < 560;
   const shortScenario = {now: 'Now', rebalance: 'Rebalance', claude: 'Claude', codex: 'Codex'};
   function renderForecast(forecast, now, share = 0.5) {
+    forecast = forecast || {};
     forecastArgs = [forecast, now, share];
     const tools = ['claude', 'codex'].filter(tool => forecast?.[tool]);
     if (!modules.forecast) blockView = 'burn';
     if (!modules.burn_rate) blockView = 'forecast';
     if (!modules.scenarios) scenario = 'now';
-    const visible = blockView === 'burn' ? modules.burn_rate && (Object.keys(burnData).length || modules.forecast && tools.length) : modules.forecast && tools.length;
+    const visible = blockView === 'burn' ? modules.burn_rate : modules.forecast;
     chartsToggle.hidden = !visible;
     if (!chartsMotion) forecastEl.hidden = !visible || !chartsOn;
     if (!visible) { forecastData = null; return; }
     if (!chartsOn) { forecastKey = ''; return; }
     forecastEl.classList.toggle('narrow', narrowChart()); // measured only once the block is shown
+    forecastEl.classList.toggle('empty', !tools.length);
     const key = JSON.stringify([forecast, Math.floor(now / 300), Math.round(share * 100), scenario, forecastEl.clientWidth, blockView, burnPeriod, burnData]);
     if (key === forecastKey) return;
     if (blockView === 'burn') { forecastKey = key; forecastData = {forecast, now, share}; renderBurn(now); return; }
     if (key === forecastKey) return;
     forecastKey = key; forecastData = {forecast: forecast, now, share};
-    // Credits in weekly % at today's Codex pace: hours of credit use times % per work hour.
+    // Credits use the default conversion even before any credit spend is measured.
     const credit = modules.codex_credits ? forecast.codex?.credits : null, rx = forecast.codex && baseRate(forecast.codex, now);
-    if (credit && credit.balance > 0 && credit.per_hour > 0 && Number.isFinite(rx)) {
+    const cpp = forecast.codex?.credits_per_percent;
+    if (credit && credit.balance > 0 && Number.isFinite(cpp) && cpp > 0) {
+      forecast = {...forecast, codex: {...forecast.codex, cap: 100 + credit.balance / cpp}};
+    } else if (credit && credit.balance > 0 && credit.per_hour > 0 && Number.isFinite(rx)) {
       forecast = {...forecast, codex: {...forecast.codex, cap: 100 + credit.balance / credit.per_hour * rx}};
     }
     const result = answers(forecast, now, share);
@@ -513,9 +668,9 @@ window.createNowView = ({node, text}) => {
     const head = node('div', 'now-forecast-head');
     const top = node('div', 'now-forecast-top');
     const verdicts = node('div', 'now-forecast-verdicts');
-    for (const tool of tools) {
+    for (const tool of ['claude', 'codex']) {
       const v = verdict(forecast[tool]), item = node('p', 'now-forecast-verdict');
-      const old = ageText(forecast[tool].last_known_age_seconds);
+      const old = ageText(forecast[tool]?.last_known_age_seconds);
       item.dataset.tool = tool; item.dataset.level = v.level;
       if (old) item.dataset.stale = 'true';
       item.append(node('span', 'now-forecast-swatch'), node('b', '', toolName(tool)), node('span', '', (old ? `last known ${old} ago, ` : '') + v.text));
@@ -533,7 +688,7 @@ window.createNowView = ({node, text}) => {
       });
       switcher.append(b);
     }
-    top.append(verdicts, ...(modules.scenarios ? [switcher] : []), ...(modules.burn_rate && !narrow ? [viewSwitch()] : []));
+    top.append(verdicts, ...(modules.scenarios && result.scenarios ? [switcher] : []), ...(modules.burn_rate && !narrow ? [viewSwitch()] : []));
     // Answers sit side by side (label over value), so the chart keeps the same height in every scenario.
     const facts = node('div', 'now-forecast-answers');
     for (const [label, value, hint] of result.rows) {
@@ -557,6 +712,7 @@ window.createNowView = ({node, text}) => {
     const bottom = node('div', 'now-forecast-bottom'); bottom.append(facts, legend, ...(modules.burn_rate && narrow ? [viewSwitch()] : []));
     head.append(top, bottom);
     forecastEl.replaceChildren(head);
+    if (!tools.length) return;
     const W = Math.max(narrow ? 200 : 300, forecastEl.clientWidth - 20), H = narrow ? 260 : 500 - 20 - 90 - 10; // fixed head height keeps the chart the same size
     const pad = narrow ? {l: 36, r: 12, t: 15, b: 30} : {l: 40, r: 120, t: 15, b: 30};
     const x0 = Math.min(...tools.map(t => forecast[t].start)), x1 = Math.max(...tools.map(t => forecast[t].resets_at));
@@ -616,7 +772,9 @@ window.createNowView = ({node, text}) => {
         if (!narrow) labels.push({tool, x: X(markAt) + 10, y: Y(endPct) + 4, text: markText});
       }
       add('circle', {cx: X(now), cy: Y(f.used_percent), r: 4, class: 'dot'}, g);
-      labels.push({tool, x: X(now) - 10, y: Y(f.used_percent) - 10, anchor: 'end', text: `${toolName(tool)} ${Math.round(f.used_percent)}%`});
+      const atStart = X(now) < pad.l + 100;
+      labels.push({tool, x: X(now) + (atStart ? 10 : -10), y: Y(f.used_percent) - 10,
+        anchor: atStart ? 'start' : 'end', text: `${toolName(tool)} ${Math.round(f.used_percent)}%`});
     }
     // Labels that would overlap move apart vertically.
     labels.sort((a, b) => a.y - b.y);
@@ -674,7 +832,7 @@ window.createNowView = ({node, text}) => {
     const byId = new Map(agents.map(agent => [agent.id, agent]));
     const finished = agent => agent.completed || ['done', 'crashed'].includes(agent.status)
       || (!agent.orchestrator && agent.status === 'blocked' && !needsYou(agent));
-    const keep = new Set(agents.filter(agent => !finished(agent)
+    const keep = new Set(agents.filter(agent => agent.has_eligible_children === true || !finished(agent)
       || now - (agent.ended ?? agent.last_at ?? 0) < 1800).map(agent => agent.id));
     const pending = [...keep];
     while (pending.length) {
@@ -761,14 +919,15 @@ window.createNowView = ({node, text}) => {
     const title = node('h3', 'now-finished-title'), finishedCount = node('span', 'now-finished-count');
     title.append(node('span', '', 'Finished'), finishedCount);
     title.tabIndex = 0; title.setAttribute('role', 'button');
-    const key = 'now-finished-collapsed:' + project;
+    // Finished work is collapsed until the owner opens it (owner 2026-11-11).
+    const key = 'now-finished-open:' + project;
     const setOpen = open => {
       finishedItems.hidden = !open; title.setAttribute('aria-expanded', String(open));
-      try { if (open) localStorage.removeItem(key); else localStorage.setItem(key, '1'); } catch {}
+      try { if (open) localStorage.setItem(key, '1'); else localStorage.removeItem(key); } catch {}
       requestAnimationFrame(drawTrees);
     };
-    let collapsed = false;
-    try { collapsed = localStorage.getItem(key) === '1'; } catch {}
+    let collapsed = true;
+    try { collapsed = localStorage.getItem(key) !== '1'; } catch {}
     finishedItems.hidden = collapsed; title.setAttribute('aria-expanded', String(!collapsed));
     title.addEventListener('click', () => setOpen(finishedItems.hidden));
     title.addEventListener('keydown', event => {
@@ -786,8 +945,13 @@ window.createNowView = ({node, text}) => {
       const icon = document.createElementNS(svgNS, 'svg'), use = document.createElementNS(svgNS, 'use');
       icon.setAttribute('aria-hidden', 'true'); use.setAttribute('href', '#now-' + agent.kind); icon.append(use); top.append(icon);
     }
-    const who = node('span', 'now-who'), model = node('span', 'now-model'); top.append(who, model);
-    const task = node('a', 'now-task');
+    const who = node('span', 'now-who'), model = node('span', 'now-model'), guessed = node('span', 'now-guessed', '?');
+    // Shown only when the board setting marks cards missing from the agents registry.
+    guessed.hidden = true; guessed.setAttribute('aria-label', 'Not in the agents registry: column and parent are guessed');
+    tip(guessed, {title: 'Not in the agents registry: column and parent are guessed'});
+    top.append(who, model, guessed);
+    const task = node('p', 'now-task');
+    el.tabIndex = 0; el.setAttribute('aria-haspopup', 'dialog');
     const status = node('div', 'now-status'), dot = node('span', 'now-dot'), action = node('span', 'now-action');
     status.append(dot, action);
     const time = node('p', 'now-time'), details = node('div', 'now-details'), footer = node('div', 'now-footer');
@@ -802,10 +966,11 @@ window.createNowView = ({node, text}) => {
     };
     const fill = circle('now-context-fill');
     fill.setAttribute('pathLength', '100'); fill.setAttribute('transform', 'rotate(-90 8 8)');
-    ring.append(circle('now-context-track'), fill); context.append(ring);
+    const contextLabel = node('span');
+    ring.append(circle('now-context-track'), fill); context.append(ring, contextLabel);
     footer.append(status, time, context); details.append(footer);
     el.append(top, task, details); group.items.append(el);
-    const view = {el, who, model, task, status, action, time, context, fill, group, depth: 0, agent};
+    const view = {el, who, model, guessed, task, status, action, time, context, contextLabel, fill, group, depth: 0, agent};
     cards.set(agent.id, view); group.cards.push(view);
     return view;
   }
@@ -813,26 +978,28 @@ window.createNowView = ({node, text}) => {
     view.agent = agent;
     if (agent.link === 'inferred') view.el.title = 'Parent link inferred from working directory and launch time';
     else if (agent.link === 'exact') view.el.title = 'Parent link recorded in session data';
+    else if (agent.follows) view.el.title = 'Follows ' + agent.follows;
     else view.el.removeAttribute('title');
-    text(view.who, agent.orchestrator ? 'Orchestrator' : agent.folder);
-    text(view.model, modelLabel(agent)); text(view.task, agent.task);
-    if (modules.codex_chats && agent.kind === 'codex' && agent.thread) view.task.href = '/?codex=' + encodeURIComponent(agent.thread);
-    else view.task.removeAttribute('href');
-    const [word, detail] = statusText(agent);
-    view.action.replaceChildren(node('span', 'now-word', word), ...(detail ? [node('span', 'now-current', detail)] : []));
+    text(view.who, agent.orchestrator ? 'Orchestrator' : agent.agent_type || agent.folder);
+    text(view.model, modelLabel(agent)); text(view.task, sessionTitleDisplay(agent.task));
+    view.guessed.hidden = agent.guessed !== true;
+    const [word, detail] = paintStatus(view.status, view.action, agent);
     tip(view.status, {title: word || 'Status', note: detail});
     const times = timeLine(agent, now);
     view.time.replaceChildren(...times.map(value => node('span', '', value)));
     tip(view.time, times.length > 1
       ? {title: agent.status === 'working' ? 'Working' : 'Worked', rows: [['Started', times[0]], ['Duration', times[1]]]}
       : {title: agent.orchestrator ? `Last reply ${times[0]}` : times[0]});
-    const known = Number.isFinite(agent.context_used) && agent.context_used >= 0
-      && Number.isFinite(agent.context_window) && agent.context_window > 0;
+    const known = Number.isInteger(agent.context_percent);
     view.context.hidden = !known;
+    const high = known && agent.context_high === true;
+    view.context.classList.toggle('high', high);
+    view.contextLabel.hidden = !high;
+    text(view.contextLabel, high ? `context ${agent.context_percent}%` : '');
     if (known) {
-      const pct = Math.max(0, Math.min(100, agent.context_used / agent.context_window * 100));
-      view.context.setAttribute('aria-label', `Context window ${Math.round(pct)}% used`);
-      view.context.dataset.level = pct >= 80 ? 'high' : pct >= 50 ? 'mid' : 'low';
+      const pct = agent.context_percent;
+      view.context.setAttribute('aria-label', `Context window ${pct}% used`);
+      view.context.dataset.level = agent.context_level;
       view.fill.setAttribute('stroke-dasharray', `${pct} 100`);
       const tokens = n => n >= 1e6 ? +(n / 1e6).toFixed(1) + 'M' : n >= 1000 ? Math.round(n / 1000) + 'k' : String(Math.round(n));
       tip(view.context, {title: 'Context window', rows: [['Used', Math.round(pct) + '%'],
@@ -843,7 +1010,126 @@ window.createNowView = ({node, text}) => {
     view.el.classList.toggle('quiet', agent.status === 'working' && Boolean(agent.quiet));
     view.el.classList.toggle('done', agent.status === 'done' || agent.completed === true);
     view.el.dataset.status = agent.status;
+    if (panelView === view) fillPanel(view);
   }
+  // Card panel: the latest turn as the transcript shows it. Nothing here is generated.
+  const panel = node('section', 'now-panel'); panel.hidden = true;
+  panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-label', 'Agent details'); panel.tabIndex = -1;
+  document.body.append(panel);
+  let panelView = null, panelExpanded = false;
+  function panelPlainText(source) {
+    return source.replace(/\r\n?/g, '\n')
+      .replace(/^[ \t]*(?:`{3,}|~{3,})[^\n]*$/gm, '')
+      .replace(/^[ \t]{0,3}#{1,6}[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$/gm, '$1')
+      .replace(/^[ \t]*>[ \t]?/gm, '')
+      .replace(/^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?/gm, '')
+      .replace(/!?\[([^\]\n]*)\]\([^)\n]*\)/g, '$1')
+      .replace(/(`+)([^\n]*?)\1/g, '$2')
+      .replace(/(\*{1,3}|~~)(?=\S)(.+?\S|\S)\1/g, '$2')
+      .replace(/(^|[^\w])(_{1,3})(?=\S)(.+?\S|\S)\2(?=$|[^\w])/g, '$1$3');
+  }
+  function panelSection(label, ...children) {
+    const section = node('div', 'now-panel-section');
+    section.append(node('div', 'now-panel-label', label), ...children);
+    return section;
+  }
+  function fillPanel(view) {
+    const agent = view.agent, brief = agent.brief || {};
+    const close = node('button', 'now-panel-close');
+    close.type = 'button'; close.setAttribute('aria-label', 'Close');
+    close.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>';
+    close.addEventListener('click', () => closePanel(true));
+    const head = node('div', 'now-panel-head'), who = node('div', 'now-panel-who');
+    who.append(node('span', '', agent.orchestrator ? 'Orchestrator' : agent.agent_type || agent.folder || ''), node('span', 'now-panel-model', modelLabel(agent, true)));
+    head.append(who, close);
+    const state = node('div', 'now-panel-state now-status'), action = node('span', 'now-action');
+    state.append(node('span', 'now-dot'), action);
+    paintStatus(state, action, agent);
+    const parts = [head, node('h3', 'now-panel-task', sessionTitleDisplay(agent.task || 'Untitled')), state];
+    if (brief.request) {
+      const request = node('p', 'now-panel-request', brief.request); request.title = brief.request;
+      parts.push(panelSection('Last request', request));
+    }
+    if (brief.reply) {
+      const reply = node('p', 'now-panel-reply', panelPlainText(brief.reply) + (brief.reply_cut ? '…' : ''));
+      reply.classList.toggle('open', panelExpanded);
+      const label = agent.status === 'working' ? 'Latest message' : 'Final message';
+      const section = panelSection(label, reply);
+      parts.push(section);
+      requestAnimationFrame(() => {
+        if (!reply.isConnected || reply.scrollHeight <= reply.clientHeight + 1 && !panelExpanded) return;
+        const more = node('button', 'now-panel-more', panelExpanded ? 'Less' : 'More');
+        more.type = 'button';
+        more.addEventListener('click', () => {
+          panelExpanded = !panelExpanded; reply.classList.toggle('open', panelExpanded);
+          text(more, panelExpanded ? 'Less' : 'More'); placePanel();
+        });
+        section.append(more); placePanel();
+      });
+    }
+    if (brief.commits?.length) {
+      const list = node('ul', 'now-panel-commits');
+      for (const [sha, subject] of brief.commits.slice().reverse()) {
+        const item = node('li', ''); item.append(node('span', 'now-panel-sha', sha), node('span', 'now-panel-subject', subject));
+        item.title = subject; list.append(item);
+      }
+      parts.push(panelSection(brief.commits.length === 1 ? 'Commit' : `Commits ${brief.commits.length}`, list));
+    }
+    if (brief.files) {
+      const list = node('ul', 'now-panel-files');
+      for (const path of brief.top_files || []) { const item = node('li', '', path); item.title = path; list.append(item); }
+      const rest = brief.files - (brief.top_files || []).length;
+      if (rest > 0) list.append(node('li', 'now-panel-rest', `and ${rest} more`));
+      parts.push(panelSection(brief.files === 1 ? 'File written' : `Files written ${brief.files}`, list));
+    }
+    if (!brief.request && !brief.reply && !brief.commits?.length && !brief.files) {
+      parts.push(node('p', 'now-panel-empty', 'Nothing from this turn in the transcript yet.'));
+    }
+    panel.replaceChildren(...parts);
+    placePanel();
+  }
+  function placePanel() {
+    if (!panelView || panel.hidden) return;
+    if (innerWidth <= 600) { panel.style.left = panel.style.top = ''; return; }
+    const r = panelView.el.getBoundingClientRect(), w = panel.offsetWidth, h = panel.offsetHeight;
+    const right = r.right + 10 + w <= innerWidth - 10;
+    const left = right ? r.right + 10 : r.left - 10 - w >= 10 ? r.left - 10 - w : Math.max(10, Math.min(innerWidth - w - 10, r.left));
+    const below = !right && r.left - 10 - w < 10;
+    const top = below ? r.bottom + 10 : r.top;
+    panel.style.left = left + 'px';
+    panel.style.top = Math.max(10, Math.min(innerHeight - h - 10, top)) + 'px';
+  }
+  function openPanel(view) {
+    if (panelView === view) { closePanel(true); return; }
+    hideTip();
+    panelView?.el.classList.remove('open');
+    panelView = view; panelExpanded = false; view.el.classList.add('open');
+    panel.hidden = false; fillPanel(view); panel.focus({preventScroll: true});
+  }
+  function closePanel(refocus) {
+    if (!panelView) return;
+    const view = panelView; panelView = null; panel.hidden = true; view.el.classList.remove('open');
+    if (refocus && view.el.isConnected) view.el.focus({preventScroll: true});
+    flush();
+  }
+  board.addEventListener('click', event => {
+    const el = event.target.closest('.now-card');
+    if (!el || event.target.closest('a[href], button')) return;
+    const view = cards.get(el.dataset.agentId);
+    if (view) openPanel(view);
+  });
+  board.addEventListener('keydown', event => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    const el = event.target.classList?.contains('now-card') ? event.target : null;
+    const view = el && cards.get(el.dataset.agentId);
+    if (view) { event.preventDefault(); openPanel(view); }
+  });
+  document.addEventListener('keydown', event => { if (event.key === 'Escape' && panelView) closePanel(true); });
+  document.addEventListener('pointerdown', event => {
+    if (panelView && !panel.contains(event.target) && !panelView.el.contains(event.target)) closePanel(false);
+  });
+  addEventListener('resize', placePanel);
+  addEventListener('scroll', placePanel, true);
   function drawTrees() {
     for (const group of groups.values()) {
       const bounds = group.el.getBoundingClientRect(), paths = [];
@@ -882,6 +1168,8 @@ window.createNowView = ({node, text}) => {
     if (!queued || reading()) return;
     clearTimeout(pauseTimer); pauseTimer = null; paused = false;
     const data = queued; queued = null;
+    snapshotAt = data.snapshot_at; showFreshness();
+    if (calculatorLink) calculatorLink.hidden = !data.calculator || !(Number.isFinite(data.calculator.used_percent) || Number.isFinite(data.calculator.credits_balance));
     dayBounds = Number.isFinite(data.local_day?.start) && Number.isFinite(data.local_day?.end) ? data.local_day : null;
     const names = {claude_sessions: 'Claude session logs', codex_sessions: 'Codex session logs', claude_desktop: 'Claude metadata',
       codex_wrapper: 'Codex wrapper logs', claude_limits: 'Claude limits', codex_limits: 'Codex limits',
@@ -901,7 +1189,7 @@ window.createNowView = ({node, text}) => {
     // Existing cards keep their order; newly seen cards append after their parent.
     // Finished work leaves after 30 min, with ancestors kept while children are active.
     const everyone = [...(data.agents || []), ...(data.completed || [])];
-    empty.hidden = everyone.length > 0 || data.codex_chats?.hidden > 0 || Boolean(sourceIssue);
+    empty.hidden = everyone.length > 0 || Boolean(sourceIssue);
     const incoming = retainedCards(everyone, data.now);
     // A same-title successor takes its predecessor's place, above existing workers.
     for (const agent of incoming.values()) {
@@ -927,6 +1215,7 @@ window.createNowView = ({node, text}) => {
     // Cards the server no longer reports (archived chat, finished before today) leave the board.
     for (const [id, view] of cards) {
       if (incoming.has(id)) continue;
+      if (panelView === view) closePanel(false);
       view.el.remove(); cards.delete(id);
       for (const group of groups.values()) group.cards = group.cards.filter(v => v !== view);
     }
@@ -970,21 +1259,21 @@ window.createNowView = ({node, text}) => {
     }
     const counts = agents => ({running: agents.filter(a => a.status === 'working').length,
       needs: agents.filter(needsYou).length,
+      context: agents.filter(a => a.context_high === true).length,
       done: agents.filter(a => (a.completed || a.status === 'done') && sameDay(a.ended ?? a.last_at, data.now)).length});
     const total = counts(everyone);
+    total.needs = everyone.filter(a => needsYou(a) || a.context_high === true).length;
     burnData = modules.burn_rate ? data.burn || {} : {}; renderLimits(data); renderForecast(data.forecast, data.now, workShare(everyone, data.now));
     summary.replaceChildren();
     for (const [value, label] of [[total.running, ' running'], [total.needs, ' needs attention'], [total.done, ' done today']]) {
       const item = node('span', 'now-summary-item');
       item.append(node('b', '', String(value)), label); summary.append(item);
     }
-    if (data.codex_chats?.running > 0) {
-      summary.append(node('span', 'now-summary-item', `Your Codex chats: ${data.codex_chats.running}`));
-    }
     for (const [project, group] of groups) {
       const c = counts(everyone.filter(a => a.project === project));
       group.el.classList.toggle('quiet', !c.running);
       group.counts.replaceChildren(...[c.needs ? `${c.needs} needs attention` : '', c.running ? `${c.running} running` : '',
+        c.context ? `${c.context} context high` : '',
         c.done ? `${c.done} done` : ''].filter(Boolean).map(value => node('span', '', value)));
     }
     paintColumns();

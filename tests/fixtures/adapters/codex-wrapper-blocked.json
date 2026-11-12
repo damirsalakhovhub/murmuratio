@@ -1,0 +1,27 @@
+{
+  "status": "blocked",
+  "title": "Independent integration review",
+  "mode": "audit",
+  "target": "/work/example",
+  "tier": "sol",
+  "model": "gpt-6.1-sol",
+  "events": "/removed/codex-task/events.jsonl",
+  "started": 2000000,
+  "pid": 7,
+  "brief": "/work/brief-review.md",
+  "parent_session": "fixture-parent",
+  "parent_app_session": "fixture-app",
+  "from_cwd": "/work/example",
+  "ended": 2000260,
+  "thread": "fixture-blocked-thread",
+  "cwd": "/work/example",
+  "verdict": "BLOCKED: worker left its branch: new branch review",
+  "head": "abcdef0123456789abcdef0123456789abcdef0123",
+  "usage": {
+    "input_tokens": 1800000,
+    "cached_input_tokens": 1600000,
+    "cache_write_input_tokens": 0,
+    "output_tokens": 8000,
+    "reasoning_output_tokens": 4000
+  }
+}

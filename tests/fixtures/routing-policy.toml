@@ -1,0 +1,21 @@
+[modules]
+forecast = true
+routing = true
+codex_credits = true
+[routing]
+credits_expire = "12-31"
+credits_reserve_months = [11]
+credits_start = "12-01"
+surplus_title = "Surplus: run Fast; Sol xhigh, Terra max, never Astra"
+surplus_effort = "max"
+[routing.codex_tiers]
+simple = "luna"
+hard = "sol"
+[routing.claude_tiers]
+simple = "Sonnet xhigh"
+hard = "Opus high"
+[routing.surplus_boost]
+luna = "sol"
+[routing.saving_boost]
+terra = "sol"
+sol = "luna"

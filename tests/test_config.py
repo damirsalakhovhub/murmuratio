@@ -7,7 +7,6 @@ import tempfile
 import threading
 import time
 from http.server import ThreadingHTTPServer
-from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -30,11 +29,24 @@ class ConfigTests(unittest.TestCase):
         config = Config.load(self.home, self.path)
         self.assertEqual(config.modules, {name: False for name in MODULES})
         self.assertEqual(config.project_order, [])
-        self.assertFalse(config.show_codex_chats)
+        self.assertFalse(hasattr(config, 'show_codex_chats'))
+        self.assertFalse(hasattr(config, 'planner_drives_routing'))
         source = NowSource(self.home, config=config)
         self.assertEqual(source.project('/work/project-a'), 'project-a')
         self.assertEqual(source.project('/work/northstar'), 'northstar')
         self.assertEqual(source.project(''), 'Unknown')
+
+    def test_retired_reset_option_is_ignored(self):
+        key = 'context_' 'reset'
+        self.path.write_text(f'[modules]\n{key} = true\n')
+        self.assertNotIn(key, Config.load(self.home, self.path).modules)
+
+    def test_retired_chat_option_is_ignored(self):
+        for value in ('true', 'false', '"legacy"'):
+            self.path.write_text(f'[modules]\ncodex_chats = {value}\n')
+            self.assertNotIn('codex_chats', Config.load(self.home, self.path).modules)
+            self.path.write_text(f'[board]\nshow_codex_chats = {value}\n')
+            self.assertFalse(hasattr(Config.load(self.home, self.path), 'show_codex_chats'))
 
     def test_loads_custom_mappings_paths_and_hours(self):
         self.path.write_text('''[modules]
@@ -47,6 +59,7 @@ end = 18
 codex_runs = "~/runs"
 routing = "~/output/route.json"
 limits_history = "~/output/history.jsonl"
+codex_plan_errors = "~/output/plan-errors.jsonl"
 [projects]
 order = ["Example", "Other"]
 fallback = "Other"
@@ -67,6 +80,7 @@ after_inherit = true
         self.assertEqual(config.wrapper_runs, self.home / 'runs')
         self.assertEqual(config.routing_file, self.home / 'output/route.json')
         self.assertEqual(config.limits_history, self.home / 'output/history.jsonl')
+        self.assertFalse(hasattr(config, 'codex_plan_errors'))
         self.assertEqual(config.project_order, ['Example', 'Other'])
         source = NowSource(self.home, config=config)
         for directory in ('workspace/project', 'workspace/project/src', 'workspace/project-worktrees/fix'):
@@ -80,10 +94,12 @@ after_inherit = true
 
     def test_invalid_values_fail_instead_of_silently_enabling_modules(self):
         for value in ('[modules]\nrouting = "yes"\n', '[work_hours]\nstart = 21\nend = 9\n',
-                      '[projects]\norder = "project"\n', '[board]\nshow_codex_chats = "yes"\n',
+                      '[projects]\norder = "project"\n',
                       'board = true\n', '[routing]\ncredits_expire = "13-01"\n',
                       '[routing]\ncredits_expire = 1231\n', 'routing = 1\n',
-                      '[limits]\ncodex_live = "yes"\n', '[paths]\ncodex_cli = ""\n'):
+                      '[limits]\ncodex_live = "yes"\n', '[paths]\ncodex_cli = ""\n',
+                      '[routing]\ncodex_resets = "2026-12-01T00:51+05:00"\n',
+                      '[routing]\ncodex_resets = ["2026-12-01T00:51"]\n', '[routing]\ncodex_resets = ["soon"]\n'):
             self.path.write_text(value)
             with self.subTest(value=value), self.assertRaises(ValueError):
                 Config.load(self.home, self.path)
@@ -100,9 +116,20 @@ after_inherit = true
         data = self.home / '.local/share/murmuratio'
         self.assertEqual((config.wrapper_runs, config.routing_file, config.limits_history),
                          (data / 'codex-runs', data / 'routing.json', data / 'limits-history.jsonl'))
+        self.assertFalse(hasattr(config, 'codex_plan_errors'))
         self.assertIsNone(config.claude_limits_extra)
         self.path.write_text('[paths]\nclaude_limits = "~/old/claude-limits.json"\n')
         self.assertEqual(Config.load(self.home, self.path).claude_limits_extra, self.home / 'old/claude-limits.json')
+
+    def test_codex_full_resets_are_read_from_config(self):
+        self.assertEqual(Config.load(self.home, self.path).codex_resets, ())
+        self.path.write_text('[routing]\ncodex_resets = ["2026-12-02T03:26+05:00", "2026-12-01T00:51+05:00"]\n')
+        self.assertEqual(Config.load(self.home, self.path).codex_resets, (1796068260.0, 1796163960.0))
+
+    def test_retired_planner_settings_are_ignored(self):
+        for flag in ('true', 'false'):
+            self.path.write_text(f'[routing]\nplanner_drives = {flag}\n')
+            self.assertFalse(hasattr(Config.load(self.home, self.path), 'planner_drives_routing'))
 
     def test_credit_expiry_defaults_to_december_31(self):
         self.assertEqual(Config.load(self.home, self.path).credits_expire, (12, 31))
@@ -313,10 +340,7 @@ class ModuleTests(unittest.TestCase):
 class EndpointTests(unittest.TestCase):
     def setUp(self):
         self.config = Config()
-        forbidden = lambda *args: self.fail('disabled source accessed')
-        codex = SimpleNamespace(state=forbidden, session=forbidden, event_text=forbidden)
-        reset = SimpleNamespace(status=forbidden, prepare=forbidden, start=forbidden)
-        self.http = ThreadingHTTPServer(('127.0.0.1', 0), server.make_handler(codex=codex, reset=reset, config=self.config))
+        self.http = ThreadingHTTPServer(('127.0.0.1', 0), server.make_handler(config=self.config))
         self.thread = threading.Thread(target=self.http.serve_forever, daemon=True)
         self.thread.start()
         self.addCleanup(self.close_server)
@@ -347,20 +371,12 @@ class EndpointTests(unittest.TestCase):
         self.config.modules['branding'] = True
         self.assertIn(b'id="now-codex"', self.get('/')[1])
 
-    def test_disabled_chat_and_reset_endpoints_are_not_available(self):
-        for route in ('/api/codex/state', '/api/codex/session?id=x', '/api/codex/reset/status?id=x'):
+    def test_removed_chat_endpoints_are_not_available(self):
+        for route in ('/api/codex/state', '/api/codex/session?id=x', '/api/codex/event?id=x&event=y',
+                      '/api/codex/reset/status?id=x', '/panels.js', '/activity.js'):
             self.assertEqual(self.get(route)[0], 404)
         config = json.loads(self.get('/api/config')[1])
-        self.assertFalse(config['modules']['codex_chats'])
-        self.assertFalse(config['modules']['context_reset'])
-        connection = http.client.HTTPConnection('127.0.0.1', self.http.server_port)
-        origin = f'http://127.0.0.1:{self.http.server_port}'
-        connection.request('POST', '/api/codex/reset/prepare', body='{}', headers={
-            'Origin': origin, 'Content-Type': 'application/json', 'X-Murmuratio-Action': '1'})
-        response = connection.getresponse()
-        self.assertEqual(response.status, 400)
-        response.read()
-        connection.close()
+        self.assertNotIn('codex_chats', config['modules'])
 
 
 class DemoTests(unittest.TestCase):
@@ -404,8 +420,8 @@ class DemoTests(unittest.TestCase):
                 raise KeyboardInterrupt
             def server_close(self):
                 pass
-        def handler(codex, public_url, reset, now, config):
-            captured.update(config=config, state=now.state(), codex=codex, reset=reset)
+        def handler(public_url, now, config):
+            captured.update(config=config, state=now.state())
             return object()
         with patch('murmuratio_app.server.ThreadingHTTPServer', FakeServer), patch('murmuratio_app.server.make_handler', side_effect=handler), \
              patch('sys.argv', ['server.py', '--demo']):
@@ -413,8 +429,6 @@ class DemoTests(unittest.TestCase):
         self.assertEqual(captured['config'].modules, Config().modules)
         self.assertEqual(captured['config'].project_order, [])
         self.assertTrue({'forecast', 'routing', 'burn', 'credits'}.isdisjoint(captured['state']))
-        self.assertIsNone(captured['codex'])
-        self.assertIsNone(captured['reset'])
 
 
 if __name__ == '__main__':

@@ -4,12 +4,14 @@ from pathlib import Path
 import re
 import shlex
 from murmuratio_app.common import one_line, timestamp
-from murmuratio_app.adapters.shared import (CLAUDE_TURN_FINISHED, current_action, content_action, context_number)
+from murmuratio_app.naming import display_name
+from murmuratio_app.adapters.shared import (CLAUDE_TURN_FINISHED, current_action, context_number)
 from murmuratio_app.adapters.limits import limit_window
+from murmuratio_app.adapters.settings import consume_codex_settings, consume_claude_settings
 from murmuratio_app.adapters.activity import start_turn, record_activity, end_turn
+from murmuratio_app.adapters.brief import consume_claude_brief, consume_codex_brief
 
 from murmuratio_app.metrics.usage import USAGE_WEIGHTS, add_usage
-
 
 def codex_launch(command, cwd, at):
     """Record only identity, location and time, never the shell command itself."""
@@ -43,14 +45,16 @@ def codex_launch(command, cwd, at):
     return {'at': at, 'cwd': str(Path(launch_cwd)) if launch_cwd else '', 'thread': None}
 
 
-def recorded_thread(value):
+def recorded_thread(value, depth=0):
+    if depth >= 64:
+        return None
     if isinstance(value, list):
-        return next((found for item in value if (found := recorded_thread(item))), None)
+        return next((found for item in value if (found := recorded_thread(item, depth + 1))), None)
     if isinstance(value, dict):
         thread = value.get('thread_id') or value.get('threadId')
         if isinstance(thread, str) and thread:
             return thread
-        return recorded_thread(value.get('content') or value.get('text'))
+        return recorded_thread(value.get('content') or value.get('text'), depth + 1)
     if not isinstance(value, str):
         return None
     match = re.search(r'(?i)\bthread[_ -]?id["\']?\s*[:=]\s*["\']?([a-z0-9_-]+)', value[:131072])
@@ -94,11 +98,16 @@ def consume_credits(data, record):
     if at is None or not math.isfinite(balance):
         return
     points, last = data.setdefault('points', []), data.get('latest')
-    if not points or points[-1][1] != balance:
+    reset = next((window.get('resets_at') for name in ('primary', 'secondary')
+                  if isinstance(window := limits.get(name), dict) and window.get('window_minutes') == 10080), None)
+    new_week = reset is not None and reset != data.get('credits_reset')
+    if not points or points[-1][1] != balance or new_week:
         # Keep when the old balance was last seen, so a spend starts there and not at its first sighting.
         if last and points and points[-1] != last:
             points.append(last)
         points.append((at, balance))
+    if reset is not None:
+        data['credits_reset'] = reset
     data['latest'] = (at, balance)
 
 
@@ -124,7 +133,9 @@ def consume_codex_meter(data, record, include_credits=True, include_burn=True):
 
 
 def consume_codex(data, record):
+    consume_codex_settings(data, record)
     at = timestamp(record.get('timestamp'))
+    consume_codex_brief(data, record)
     event = record.get('payload') if record.get('type') == 'event_msg' else record
     event_type = event.get('type') if isinstance(event, dict) else None
     if event_type in ('task_started', 'turn_started', 'turn.started'):
@@ -141,20 +152,21 @@ def consume_codex(data, record):
         data['thread'] = record.get('thread_id')
     item = record.get('item')
     if isinstance(item, dict):
-        action = item.get('command') or item.get('text') or item.get('message')
-        if one_line(action):
-            data['last_action'] = one_line(action)
         if item.get('type') == 'command_execution':
             data['current_action'] = current_action('command', item.get('command'))
         elif item.get('type') == 'file_change':
             data['current_action'] = 'editing files'
         elif item.get('type') == 'mcp_tool_call':
             data['current_action'] = current_action('mcp__' + one_line(item.get('tool')), server=item.get('server', ''))
+    if record.get('type') == 'compacted' or event_type == 'context_compacted':
+        data['context_tokens'] = None
+        data['_context_invalidated'] = True
     # exec turn.completed usage is cumulative spend, not current context.
     if record.get('type') == 'token_usage_record':
         usage = record.get('usage')
-        if isinstance(usage, dict):
-            data['context_tokens'] = usage.get('input_tokens')
+        if isinstance(usage, dict) and context_number(usage.get('input_tokens')):
+            data['context_tokens'] = usage['input_tokens']
+            data.pop('_context_invalidated', None)
     event = record.get('payload') if record.get('type') == 'event_msg' else record
     if isinstance(event, dict) and event.get('type') == 'token_count':
         info = event.get('info')
@@ -163,17 +175,22 @@ def consume_codex(data, record):
             if isinstance(usage, dict) and context_number(usage.get('input_tokens')):
                 # Codex input_tokens already includes cached_input_tokens.
                 data['context_tokens'] = usage['input_tokens']
+                data.pop('_context_invalidated', None)
             if context_number(info.get('model_context_window'), positive=True):
                 data['context_window'] = info['model_context_window']
 
 
 def consume_claude(data, record):
+    if record.get('isSidechain'):
+        return
+    if record.get('type') == 'system' and record.get('subtype') == 'compact_boundary':
+        data['context_tokens'] = None
+        return
+    consume_claude_settings(data, record)
     kind = record.get('type')
     if kind not in ('user', 'assistant'):
         return
     message = record.get('message')
-    if record.get('isSidechain'):
-        return
     if not isinstance(message, dict):
         raise ValueError('Unsupported Claude message')
     at = timestamp(record.get('timestamp'))
@@ -182,9 +199,6 @@ def consume_claude(data, record):
         data['last_at'] = at
     if isinstance(record.get('cwd'), str):
         data['cwd'] = record['cwd']
-    action = content_action(message)
-    if action:
-        data['last_action'] = action
     content = message.get('content')
     if isinstance(content, list):
         for part in content:
@@ -205,14 +219,20 @@ def consume_claude(data, record):
                 if launch:
                     launch['thread'] = recorded_thread(part.get('content')) or launch['thread']
     tool_result = isinstance(content, list) and any(isinstance(p, dict) and p.get('type') == 'tool_result' for p in content)
+    consume_claude_brief(data, record, kind, message, tool_result)
     if kind == 'user' and not tool_result:
+        if not record.get('isMeta') and 'effort' in data:
+            data['effort'] = None
         if at is not None and not record.get('isMeta'):
             data['turn_started'] = at
             start_turn(data, at)
         texts = [content] if isinstance(content, str) else [p.get('text', '') for p in content or [] if isinstance(p, dict) and p.get('type') == 'text']
-        first_line = next((line.strip() for text in texts if isinstance(text, str) for line in text.splitlines() if line.strip()), '')
+        first_line, _ = display_name(text='\n'.join(text for text in texts if isinstance(text, str)))
+        if first_line == 'Untitled':
+            first_line = ''
         if first_line:
             data.setdefault('first_user', first_line)
+            data.setdefault('first_user_raw', '\n'.join(text for text in texts if isinstance(text, str)))
     data['last_turn'] = message.get('stop_reason') if kind == 'assistant' else 'user'
     record_activity(data, at)
     if kind == 'assistant' and message.get('stop_reason') in CLAUDE_TURN_FINISHED and at is not None:
@@ -224,6 +244,8 @@ def consume_claude(data, record):
             if model != data.get('model'):
                 data.pop('context_window', None)
             data['model'] = model
+        if model == '<synthetic>':
+            return
         usage = message.get('usage')
         for source in (usage, message, record):
             if not isinstance(source, dict):

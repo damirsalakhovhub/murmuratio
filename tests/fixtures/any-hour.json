@@ -1,0 +1,14 @@
+{
+  "week_start": "2026-11-09T12:00:00+05:00",
+  "moments": {
+    "fresh": {"elapsed": 0, "used": 0, "balance": 48000, "spent": 1.25},
+    "five-minutes": {"elapsed": 300, "used": 0, "balance": 48000, "spent": 1.25},
+    "one-hour": {"elapsed": 3600, "used": 1, "balance": 48000, "spent": 1.25},
+    "midweek": {"elapsed": 259200, "used": 42.857142857142854, "balance": 0, "spent": 0},
+    "overspend": {"elapsed": 259200, "used": 90, "balance": 0, "spent": 0},
+    "last-hour": {"elapsed": 601200, "used": 80, "balance": 0, "spent": 0},
+    "credit-phase": {"elapsed": 518400, "used": 100, "balance": 14000, "spent": 30000},
+    "empty": {"elapsed": 0, "missing": true},
+    "expired": {"elapsed": 300, "expired": true, "used": 100, "balance": 48000, "spent": 0}
+  }
+}

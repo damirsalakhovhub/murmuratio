@@ -61,7 +61,7 @@ def credit_totals(readings: Sequence[CodexMeter], include_credits: bool, now: fl
 def burn_by_model(forecast, claude_models, codex_readings):
     out = {}
     claude = forecast.get('claude')
-    if claude and claude_models:
+    if claude:
         total = sum(c for hour, by in claude_models.items() if hour >= claude['start'] - 3600 for c in by.values())
         scale = claude['used_percent'] / total if total else 0
         out['claude'] = dict(start=claude['start'], hours=sorted(

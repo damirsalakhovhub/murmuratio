@@ -16,7 +16,7 @@ function stageClaude(home, id) {
     message: {stop_reason: 'tool_use', model: 'claude-sonnet-5-5', content: [
       {type: 'tool_use', name: 'Bash', id: 'synthetic-tool', input: {command: 'work'}}]}};
   fs.writeFileSync(path.join(project, `${id}.jsonl`), `${JSON.stringify(record)}\n`);
-  fs.writeFileSync(path.join(desktop, `local_${id}.json`), JSON.stringify({cliSessionId: id}));
+  fs.writeFileSync(path.join(desktop, `local_${id}.json`), JSON.stringify({cliSessionId: id, spawnedFrom: {sessionId: 'fixture-launcher'}}));
 }
 
 function settingsAt(home) { return path.join(home, '.claude/settings.json'); }

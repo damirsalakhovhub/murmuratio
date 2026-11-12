@@ -1,15 +1,22 @@
 """Session snapshots and local quota history for Claude and Codex routing."""
+from datetime import datetime
 import json
+import math
 import os
 from pathlib import Path
 import shutil
 import threading
 import time
 from murmuratio_app.config import Config
-from murmuratio_app.common import local_day, pid_alive
-from murmuratio_app.grouping import retain_agents, link_parents as group_parents, merge_codex_sources
-from murmuratio_app.history import read_limit_history, limit_history_additions, replace_text
-from murmuratio_app.metrics.quota import balance_at, credits_expiry, quota_routing, week_forecast
+from murmuratio_app.naming import name_fields
+from murmuratio_app.common import active_today, local_day, pid_alive
+from murmuratio_app.grouping import board_parents, board_sessions, retain_agents, link_parents as group_parents, merge_codex_sources
+from murmuratio_app.health import assignment_health, limits_health
+from murmuratio_app.history import (append_routing_history, read_routing_history, read_limit_history,
+                                   limit_history_additions, replace_text)
+from murmuratio_app.metrics.quota import (DEFAULT_CREDITS_PER_PERCENT, balance_at, balance_since,
+                                        calculator_timeline, codex_mode, credits_expiry,
+                                        manual_reset_started, quota_routing, week_forecast)
 from murmuratio_app.metrics.usage import burn_by_model as calculate_burn, claude_usage_totals, credit_totals
 from murmuratio_app.adapters.claude import ClaudeDesktopAdapter, ClaudeSessionsAdapter
 from murmuratio_app.adapters.wrapper import CodexWrapperAdapter
@@ -17,11 +24,29 @@ from murmuratio_app.adapters.codex_board import CodexBoardAdapter, HISTORY_SECON
 from murmuratio_app.adapters.usage import ClaudeUsageAdapter, CodexMeterAdapter
 from murmuratio_app.adapters.quota_sources import ClaudeLimitsAdapter, CodexLimitsAdapter, app_server_limits
 from murmuratio_app.discovery import Discovery
-from murmuratio_app.adapters.shared import JsonlSummary
+from murmuratio_app.adapters.shared import JsonlSummary, model_context_window
 from murmuratio_app.adapters.base import read_error_reason
+from murmuratio_app.adapters.registry import AgentsRegistryAdapter
 
 
 LIVE_LIMITS_SECONDS = 300
+REQUEST_SECONDS = 1.0       # longest a request waits for a new board state
+FIRST_REQUEST_SECONDS = 5.0  # right after start there is no earlier state to show
+
+
+def context_signal(agent, threshold):
+    """Normalize the current context once, after all provider observations are merged."""
+    used, window = agent.get('context_used'), agent.get('context_window')
+    known = (type(used) in (int, float) and math.isfinite(used) and used >= 0
+             and type(window) in (int, float) and math.isfinite(window) and window > 0)
+    percent = min(100, used / window * 100) if known else None
+    finished = agent.get('completed') or agent.get('status') in ('done', 'crashed')
+    level = ('finished' if finished else 'high') if percent is not None and percent >= threshold else (
+        'mid' if percent is not None and percent >= 50 else 'low')
+    return {'context_percent': int(percent + .5) if percent is not None else None,
+            'context_level': level if known else None,
+            'context_high': bool(percent is not None and percent >= threshold
+                                 and not finished)}
 
 
 def web_build():
@@ -42,11 +67,17 @@ class NowSource:
         self.lock = threading.Lock()
         self.last_snapshot = None
         self.last_snapshot_at = 0
+        self.refresh_failed = False
+        self.refresh_lock = threading.Lock()
+        self.refreshing = None  # Event of the running off-request refresh
         self.usage_lock = threading.Lock()
         self.usage_cache = {}
         self.usage_running = set()
         paths = Discovery.at(self.home, self.config, codex_home)
         self.discovery = paths
+        if self.codex is None:
+            from murmuratio_app.adapters.codex_sessions import CodexSource
+            self.codex = CodexSource(paths.codex_home)
         self.desktop_adapter = ClaudeDesktopAdapter(paths.claude_desktop)
         self.claude_adapter = ClaudeSessionsAdapter(paths.claude_sessions, self.summary, self.cache, self.project)
         self.wrapper_adapter = CodexWrapperAdapter(paths.codex_wrapper, self.summary, self.cache, self.codex_cwd,
@@ -58,6 +89,7 @@ class NowSource:
         self.codex_limits_adapter = CodexLimitsAdapter(paths.codex_rollouts, clock)
         self.claude_usage_adapter = ClaudeUsageAdapter(paths.claude_sessions)
         self.codex_meter_adapter = CodexMeterAdapter(paths.codex_rollouts)
+        self.registry_adapter = AgentsRegistryAdapter(paths.agents_registry)
         self.source_statuses = {}
         self.source_reasons = {}
         self.board_by_thread = {}
@@ -139,10 +171,16 @@ class NowSource:
         """Read the latest normalized per-turn context for a Codex thread."""
         if thread in self.board_by_thread:
             agent = self.board_by_thread[thread]
-            return {key: agent[key] for key in ('context_tokens', 'context_window') if agent.get(key) is not None}
+            return {key: agent.get(key) for key in ('context_tokens', 'context_window')
+                    if agent.get(key) is not None or key == 'context_tokens' and agent.get('_context_invalidated')}
         if not thread or not self.codex:
             return {}
-        rows = self._read_adapter(self.codex, 'context', thread, self.summary, seen, self.cache)
+        # This is a lookup for one wrapper thread, not the board-wide rollout
+        # source. A damaged archived rollout must not mark all sessions unhealthy.
+        result = self.codex.read('context', thread, self.summary, seen, self.cache)
+        if result.status != 'available':
+            return {'context_tokens': None}
+        rows = result.values()
         return rows[0] if rows else {}
 
     def codex_cwd(self, thread):
@@ -150,7 +188,7 @@ class NowSource:
             return self.board_by_thread[thread]['cwd']
         if not thread or not self.codex:
             return None
-        rows = self._read_adapter(self.codex, 'cwd', thread)
+        rows = self.codex.read('cwd', thread).values()
         return rows[0]['cwd'] if rows else None
 
     def burn_by_model(self, now):
@@ -159,12 +197,6 @@ class NowSource:
 
     def desktop_sessions(self):
         return {row['cli_session_id']: row for row in self._read_adapter(self.desktop_adapter)}
-
-    def codex_titles(self):
-        try:
-            return self.sanitize(self.wrapper_adapter.titles()) if self.sanitize else self.wrapper_adapter.titles()
-        except Exception:
-            return {}
 
     def run(self, path, now, seen=None):
         return self.wrapper_adapter.run(path, now, seen)
@@ -189,27 +221,34 @@ class NowSource:
     def routing(self, limits, now, credits=None, ages=None, write=True):
         modules = self.config.modules
         path = self.config.limits_history
-        history, prune = read_limit_history(path, now) if modules['forecast'] or modules['routing'] else ([], False)
+        history, prune = self._isolate('quota_history', ([], False), lambda: read_limit_history(path, now)) if path else ([], False)
+        self.limit_history = history
         # History gets only fresh samples: a stale one would be stamped with the wrong time.
         fresh = {tool: windows for tool, windows in limits.items() if tool not in (ages or {})}
         additions = limit_history_additions(fresh, history, now) if modules['forecast'] or modules['routing'] else []
         history.extend(additions)
+        credit_pace = (credits.get('spent_per_day') or 0) / DEFAULT_CREDITS_PER_PERCENT if credits else None
         self.forecast = {tool: week_forecast(tool, next((w for w in limits.get(tool, []) if w['window_minutes'] == 10080), None),
-                                             history, now) for tool in ('claude', 'codex')} if modules['forecast'] or modules['burn_rate'] else {}
-        if modules['forecast'] or modules['routing']:
+                                             history, now, None, self.config.work_hours,
+                                             credit_pace if tool == 'codex' else None)
+                         for tool in ('claude', 'codex')} if modules['forecast'] or modules['burn_rate'] else {}
+        def save_history():
             path.parent.mkdir(parents=True, exist_ok=True)
             if prune:
                 replace_text(path, ''.join(json.dumps(row, allow_nan=False) + '\n' for row in history))
             elif additions:
                 with path.open('a') as stream:
                     stream.writelines(json.dumps(row, allow_nan=False) + '\n' for row in additions)
+        if path and (modules['forecast'] or modules['routing']) and self.source_statuses.get('quota_history') == 'available':
+            self._isolate('quota_history', None, save_history)
         for tool, age in (ages or {}).items():
             if self.forecast.get(tool):
                 self.forecast[tool]['last_known_age_seconds'] = age
         if not modules['routing']:
             return None
         routing = quota_routing(limits, history, now, credits, self.config.work_hours[1] - self.config.work_hours[0],
-                                credits_expiry(now, *self.config.credits_expire))
+                                credits_expiry(now, *self.config.credits_expire),
+                                self.config.codex_resets, work_hours=self.config.work_hours, policy=self.config.routing_policy)
         for tool, age in (ages or {}).items():
             if routing[tool]['used_percent'] is not None:
                 routing[tool]['last_known_age_seconds'] = age
@@ -217,7 +256,42 @@ class NowSource:
             target = self.config.routing_file
             target.parent.mkdir(parents=True, exist_ok=True)
             replace_text(target, json.dumps(routing, indent=2, allow_nan=False) + '\n')
+            self._isolate('routing_history', None, lambda: append_routing_history(self.routing_history_path(), routing))
         return routing
+
+    def routing_history_path(self):
+        path = self.config.limits_history
+        return path.parent / 'routing-history.jsonl' if path else None
+
+    def snapshot(self):
+        """The board state for a request, never waiting longer than REQUEST_SECONDS.
+
+        The state is computed off the request thread. A request waits a moment for a fresh one;
+        if that takes longer (a slow disk holds the process), it gets the last
+        complete state marked stale. None means no state has been computed yet."""
+        with self.refresh_lock:
+            done = self.refreshing
+            if done is None:
+                done = self.refreshing = threading.Event()
+                threading.Thread(target=self._refresh, args=(done,), name='murmuratio-board', daemon=True).start()
+        done.wait(REQUEST_SECONDS if self.last_snapshot is not None else FIRST_REQUEST_SECONDS)
+        snapshot, finished = self.last_snapshot, self.last_snapshot_at
+        if snapshot is None:
+            return None
+        snapshot = dict(snapshot, refresh_failed=self.refresh_failed)
+        if done.is_set():
+            return snapshot
+        return dict(snapshot, stale=True, stale_seconds=round((time.monotonic_ns() - finished) / 1e9, 1))
+
+    def _refresh(self, done):
+        try:
+            self.state()
+        except Exception:
+            self.refresh_failed = True  # retain the last complete state and expose the failure
+        finally:
+            with self.refresh_lock:
+                self.refreshing = None
+            done.set()
 
     def state(self):
         requested_at = time.monotonic_ns()
@@ -227,7 +301,8 @@ class NowSource:
             now, agents, completed, seen = self.clock(), [], [], set()
             self.source_statuses = {}
             self.source_reasons = {}
-            rollouts = self._isolate('codex_sessions', [], lambda: self._read_adapter(self.codex_board_adapter, now))
+            registry = self._isolate('agents_registry', {}, self.registry)
+            rollouts = self._isolate('codex_sessions', [], lambda: self._read_adapter(self.codex_board_adapter, now, registry))
             self.board_by_thread = {}
             for agent in rollouts:
                 previous = self.board_by_thread.get(agent['thread'])
@@ -244,24 +319,49 @@ class NowSource:
             agents.extend(claude)
             for path in set(self.cache) - seen:
                 del self.cache[path]
-            linked = self.link_parents(agents + completed, desktop)
-            hidden_chats = [a for a in linked if a.get('codex_role') == 'chat' and not self.config.show_codex_chats]
-            hidden_running = sum(not a.get('completed') and a['status'] in ('working', 'hung') for a in hidden_chats)
-            linked = [a for a in linked if a.get('codex_role') != 'chat' or self.config.show_codex_chats]
-            hidden_ids = {a['id'] for a in hidden_chats}
+            linked = self.link_parents(agents + completed, desktop, registry)
             for agent in linked:
-                if agent.get('parent_id') in hidden_ids:
-                    agent['parent_id'] = None
-                    agent.pop('link', None)
-            agents = retain_agents([a for a in linked if not a.get('completed')], now)
+                agent.pop('has_eligible_children', None)
+                agent['context_window'] = model_context_window(agent, agent.get('model'))
+                agent.update(context_signal(agent, self.config.context_high_percent))
+                agent['model'] = agent.get('model') or None
+                agent['effort'] = agent.get('effort') or None
+                agent.update(name_fields(titles=[(agent.get('title_source'), agent.get('task'))], project=agent.get('project', '')))
             completed = [a for a in linked if a.get('completed') and (a['kind'] != 'codex'
                          or now - (a.get('ended') or a.get('last_at') or 0) < HISTORY_SECONDS)]
+            agents = retain_agents([a for a in linked if not a.get('completed')], now)
+            retained = agents + completed
+            retained_ids = {a['id'] for a in retained}
+            children = retained + [a for a in linked if a['id'] not in retained_ids
+                                   and (a.get('completed') or a['status'] in ('done', 'crashed'))
+                                   and active_today(a.get('ended') or a.get('last_at'), now)]
+            parents = board_parents(children, now, linked)
+            # A chat can wait longer than an ordinary worker while its children remain on the board.
+            retained.extend(a for a in linked if a['id'] in parents and a['id'] not in retained_ids
+                            and not any(a.get(key) for key in ('parent_id', 'parent_session', 'parent_app_session')))
+            visible = board_sessions(retained, now, children)
+            for agent in visible:
+                if agent['id'] in parents and not any(agent.get(key) for key in ('parent_id', 'parent_session', 'parent_app_session')):
+                    agent['has_eligible_children'] = True
+            agents = [a for a in visible if not a.get('completed')]
+            completed = [a for a in visible if a.get('completed')]
+            retained_ids = {a['id'] for a in agents + completed}
+            completed = [a for a in completed if not a.get('subagent_id') or a.get('parent_id') in retained_ids]
             agents.sort(key=lambda a: (a['status'] != 'working', -(a['last_at'] or 0)))
             completed.sort(key=lambda a: -(a['ended'] or 0))
             live = None
             if self.config.codex_live_limits:
-                # Codex writes limits only while it works; ask Codex itself every 5 minutes.
-                snapshot = self._background_usage('codex_live_limits', 'live', now, self._collect_codex_live, LIVE_LIMITS_SECONDS)
+                # Ask every five minutes, or at the next known reset. An old cached
+                # percentage must not hide the new week until the normal poll is due.
+                interval = LIVE_LIMITS_SECONDS
+                with self.usage_lock:
+                    previous = self.usage_cache.get('codex_live_limits')
+                if previous and previous['value']:
+                    resets = [w['resets_at'] for w in previous['value'][1] if w.get('resets_at') is not None]
+                    if resets:
+                        due = min(resets) - previous['at']
+                        interval = max(1, min(interval, due)) if due > 0 else 30  # retry a delayed provider reset
+                snapshot = self._background_usage('codex_live_limits', 'live', now, self._collect_codex_live, interval)
                 if snapshot:
                     self.source_statuses['codex_live_limits'] = snapshot['status']
                     live = snapshot['value']
@@ -295,7 +395,9 @@ class NowSource:
             ages = {kind: getattr(self, kind + '_limits_adapter').age_seconds
                     for kind in limits if getattr(self, kind + '_limits_adapter').stale}
             codex_reset = next((w['resets_at'] for w in routing_limits['codex'] if w['window_minutes'] == 10080), None)
-            week_start = balance_at(credit_points, codex_reset - 7 * 86400) if credits and codex_reset is not None else None
+            # Only debits observed within this week belong to its plan. A gap across
+            # the reset cannot establish which week paid for the balance change.
+            week_start = balance_since(credit_points, codex_reset - 7 * 86400) if credits and codex_reset is not None else None
             if week_start is not None:
                 credits['week_start_balance'] = week_start  # credits spent this week count against its share
             # Right after start the credit scan and the live Codex read are still running: routing from
@@ -307,7 +409,9 @@ class NowSource:
             month = (routing or {}).get('codex', {}).get('credits')
             if credits and month:
                 credits.update(month_left=month['month_left'], month_ends_at=month['month_ends_at'],
-                               week_share_left=month.get('week_share_left'))
+                               week_share_left=month.get('week_share_left'), credits_plan=month.get('credits_plan'))
+                if 'reserved_until' in month:
+                    credits['reserved_until'] = month['reserved_until']
             forecast = getattr(self, 'forecast', {})
             codex_week = forecast.get('codex')
             if codex_week and modules['codex_credits']:
@@ -325,16 +429,45 @@ class NowSource:
                         worker_share, self.claude_models = snapshot['value']
                         if include_split:
                             claude_week['worker_share'] = worker_share
-            state = {'agents': agents, 'completed': completed, 'now': now, 'local_day': local_day(now), 'limits': limits, 'build': web_build(),
-                     'codex_chats': {'hidden': len(hidden_chats), 'running': hidden_running}}
+            state = {'agents': agents, 'completed': completed, 'now': now, 'local_day': local_day(now), 'limits': limits, 'build': web_build(), 'refresh_failed': False, 'snapshot_at': now}
             if modules['routing']:
                 state['routing'] = routing
+                if routing:
+                    state['health'] = dict(
+                        limits=limits_health(routing, forecast),
+                        assignments=assignment_health(agents + completed, self._isolate(
+                            'routing_history', [], lambda: read_routing_history(self.routing_history_path())), now))
             if modules['forecast']:
                 state['forecast'] = forecast
             if modules['burn_rate']:
                 state['burn'] = self.burn_by_model(now)
             if modules['codex_credits']:
                 state['credits'] = credits
+            week = next((w for w in routing_limits['codex'] if w['window_minutes'] == 10080), {})
+            mode = (routing or {}).get('codex_mode')
+            history = getattr(self, 'limit_history', []) if any(modules[k] for k in ('forecast', 'routing', 'burn_rate')) else []
+            if mode is None:
+                projection = week_forecast('codex', week, history, now, work_hours=self.config.work_hours)
+                mode = codex_mode(projection, self.config.codex_resets, now, work_hours=self.config.work_hours, policy=self.config.routing_policy)
+            else:
+                history = getattr(self, 'limit_history', [])
+            reset = week.get('resets_at')
+            used_reset = bool(reset) and manual_reset_started(history, reset)
+            left = [at for at in self.config.codex_resets if at > now]
+            balance = (credits or {}).get('balance')
+            spend_from = self.config.routing_policy.spend_from(now)
+            start_balance = balance_at(credit_points, spend_from) if balance is not None and spend_from and credit_points else balance
+            state['calculator'] = dict(used_percent=week.get('used_percent'), next_reset=week.get('resets_at'),
+                                     remaining_percent=100 - week['used_percent'] if week else None,
+                                     extra_resets=left,
+                                     resets_total=max(len(self.config.codex_resets), len(left) + used_reset),
+                                     credits_balance=balance,
+                                     credits_start_balance=max(start_balance, balance) if balance is not None else None,
+                                     timeline=calculator_timeline(reset, mode.get('reset_deadlines', []),
+                                                                  mode.get('reset_plan', []), now, used_reset),
+                                     credits_per_percent=DEFAULT_CREDITS_PER_PERCENT,
+                                     credits_expire_at=credits_expiry(now, *self.config.credits_expire),
+                                     mode=mode)
             issues = {name: {'status': status} for name, status in self.source_statuses.items() if status != 'available'}
             for name, issue in issues.items():
                 if self.source_reasons.get(name):
@@ -344,11 +477,22 @@ class NowSource:
                     issues[adapter.name]['age_seconds'] = adapter.age_seconds
                     if adapter.stale and issues[adapter.name]['status'] != 'stale':
                         issues[adapter.name]['stale'] = True
+            if self.registry_adapter.malformed and self.source_statuses.get('agents_registry') == 'available':
+                issues['agents_registry'] = {'status': 'available', 'malformed': self.registry_adapter.malformed}
             if issues:
                 state['sources'] = issues
+            self.refresh_failed = False
             self.last_snapshot = self.sanitize(state)
             self.last_snapshot_at = time.monotonic_ns()
             return self.last_snapshot
 
-    def link_parents(self, agents, desktop):
-        return group_parents(agents, desktop, self.clock)
+    def registry(self):
+        """Registry id to its latest record; empty when the file does not exist yet."""
+        return {record['id']: record for record in self._read_adapter(self.registry_adapter)}
+
+    def link_parents(self, agents, desktop, registry=None):
+        config = self.config
+        columns = [*config.project_order, *(name for _, name, _ in config.project_mappings),
+                   *(name for _, name, _ in config.project_fallback_mappings), config.fallback_project]
+        return group_parents(agents, desktop, self.clock, registry if registry is not None else {},
+                             config.mark_guessed, columns)

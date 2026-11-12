@@ -1,0 +1,331 @@
+{
+  "now": 1857614400,
+  "local_day": {
+    "start": 1857582000,
+    "end": 1857668400
+  },
+  "limits": {
+    "codex": [
+      {
+        "window_minutes": 10080,
+        "used_percent": 64.0,
+        "resets_at": 1857974400
+      }
+    ],
+    "claude": [
+      {
+        "window_minutes": 300,
+        "used_percent": 5,
+        "resets_at": 1857618000
+      },
+      {
+        "window_minutes": 10080,
+        "used_percent": 65,
+        "resets_at": 1857916800
+      }
+    ]
+  },
+  "forecast": {
+    "claude": {
+      "start": 1857312000,
+      "resets_at": 1857916800,
+      "used_percent": 65,
+      "points": [
+        [
+          1857312000,
+          0
+        ],
+        [
+          1857376800,
+          6
+        ],
+        [
+          1857394800,
+          8
+        ],
+        [
+          1857434400,
+          10
+        ],
+        [
+          1857452400,
+          15
+        ],
+        [
+          1857466800,
+          21
+        ],
+        [
+          1857484800,
+          30
+        ],
+        [
+          1857510000,
+          33
+        ],
+        [
+          1857531600,
+          35
+        ],
+        [
+          1857546000,
+          45
+        ],
+        [
+          1857564000,
+          55
+        ],
+        [
+          1857574800,
+          60
+        ],
+        [
+          1857610800,
+          64
+        ],
+        [
+          1857614400,
+          65
+        ]
+      ],
+      "pace_per_day": 21.67,
+      "projected_at_reset": 151.67,
+      "hits_100_at": 1857726000,
+      "prior_per_day": 14.25,
+      "pace_source": "history and default",
+      "live_weight": 1.0,
+      "rate_per_hour": 1.81,
+      "worker_share": 0.97
+    },
+    "codex": {
+      "start": 1857369600,
+      "resets_at": 1857974400,
+      "used_percent": 64.0,
+      "points": [
+        [
+          1857369600,
+          0.0
+        ],
+        [
+          1857394800,
+          2.0
+        ],
+        [
+          1857405600,
+          8
+        ],
+        [
+          1857452400,
+          18.0
+        ],
+        [
+          1857456000,
+          27.0
+        ],
+        [
+          1857459600,
+          32.0
+        ],
+        [
+          1857463200,
+          40.0
+        ],
+        [
+          1857466800,
+          44.0
+        ],
+        [
+          1857477600,
+          46.0
+        ],
+        [
+          1857546000,
+          50
+        ],
+        [
+          1857574800,
+          54
+        ],
+        [
+          1857585600,
+          61.0
+        ],
+        [
+          1857614400,
+          64.0
+        ]
+      ],
+      "pace_per_day": 23.89,
+      "projected_at_reset": 167.22,
+      "hits_100_at": 1857722400,
+      "prior_per_day": 14.54,
+      "pace_source": "history and default",
+      "live_weight": 1.0,
+      "rate_per_hour": 1.99,
+      "credits_per_percent": 250.0,
+      "credits": {
+        "balance": 48000,
+        "at": 1857614400,
+        "per_hour": 200,
+        "sample_credits": 100,
+        "sample_hours": 0.5,
+        "spent_per_day": 79.68,
+        "month_start_balance": 48000,
+        "week_start_balance": 48000,
+        "month_left": 0,
+        "month_ends_at": 1861902000,
+        "week_share_left": 0,
+        "credits_plan": {
+          "target_per_week": 0,
+          "spent_this_week": 0,
+          "expected_by_now": 0.0,
+          "credit_days_start": 1857801600,
+          "status": "on"
+        },
+        "reserved_until": 1859223600
+      }
+    }
+  },
+  "credits": {
+    "balance": 48000,
+    "at": 1857614400,
+    "per_hour": 200,
+    "sample_credits": 100,
+    "sample_hours": 0.5,
+    "spent_per_day": 79.68,
+    "month_start_balance": 48000,
+    "week_start_balance": 48000,
+    "month_left": 0,
+    "month_ends_at": 1861902000,
+    "week_share_left": 0,
+    "credits_plan": {
+      "target_per_week": 0,
+      "spent_this_week": 0,
+      "expected_by_now": 0.0,
+      "credit_days_start": 1857801600,
+      "status": "on"
+    },
+    "reserved_until": 1859223600
+  },
+  "health": {
+    "limits": {
+      "score": 7,
+      "reason": "Claude runs out before reset",
+      "parts": [
+        {
+          "tool": "claude",
+          "score": 7,
+          "ratio": 1.52,
+          "used_percent": 65,
+          "resets_at": 1857916800,
+          "hits_100_at": 1857726000
+        },
+        {
+          "tool": "codex",
+          "score": 100,
+          "ratio": 0.93,
+          "used_percent": 64.0,
+          "resets_at": 1857974400,
+          "hits_100_at": 1857722400
+        }
+      ]
+    },
+    "assignments": {
+      "score": 97,
+      "reason": "2 of 60 against advice",
+      "judged": 60,
+      "wrong": [],
+      "since": 1857538800
+    }
+  },
+  "routing": {
+    "at": 1857614400,
+    "leader": "default",
+    "code_to": "codex",
+    "design_to": "claude",
+    "tiers": {
+      "codex": {
+        "simple": "luna",
+        "hard": "sol"
+      },
+      "claude": {
+        "simple": "Sonnet xhigh",
+        "hard": "Opus high"
+      }
+    },
+    "claude": {
+      "used_percent": 65,
+      "remaining": 35,
+      "resets_at": 1857916800,
+      "days_left": 3.52,
+      "allowance_per_day": 9.95,
+      "burn_per_day": 10.87,
+      "headroom": 0.92
+    },
+    "codex": {
+      "used_percent": 64.0,
+      "remaining": 36.0,
+      "resets_at": 1857974400,
+      "days_left": 4.18,
+      "allowance_per_day": 26.6,
+      "burn_per_day": 15.54,
+      "headroom": 1.08,
+      "credits_percent": 311.03,
+      "credits": {
+        "balance": 48000,
+        "expires_at": 1861902000,
+        "per_hour": 200,
+        "per_hour_measured": true,
+        "days_left": 49.64,
+        "burn_per_day": 79.68,
+        "month_ends_at": 1861902000,
+        "month_left": 0,
+        "month_pool": 0,
+        "reserved_until": 1859223600,
+        "weeks_left_in_month": 7.49,
+        "week_share": 0,
+        "week_share_left": 0,
+        "week_share_percent": 0.0,
+        "credits_plan": {
+          "target_per_week": 0,
+          "spent_this_week": 0,
+          "expected_by_now": 0.0,
+          "credit_days_start": 1857801600,
+          "status": "on"
+        }
+      }
+    },
+    "reason": "Codex keeps code, while Claude keeps design with Sonnet xhigh for simple work and Opus high for hard work.",
+    "codex_mode": {
+      "id": "surplus",
+      "title": "Surplus: run Fast; Sol xhigh, Terra max, never Astra",
+      "reason": "Week at 64%, pace reaches 167% by Mon 16, with 2 resets to use in November. To press a reset on Thu 12, burn ~60%/day.",
+      "boost": {
+        "luna": "sol"
+      },
+      "fast": true,
+      "effort": "max",
+      "reset_share": 75.1,
+      "headroom": 1.08,
+      "demand": 103.22,
+      "available": 111.1,
+      "reset_reminder": null,
+      "reset_plan": [
+        1857639600,
+        1857798000
+      ],
+      "reset_deadlines": [
+        1859223600,
+        1859223600
+      ]
+    },
+    "codex_boost": {
+      "luna": "sol"
+    },
+    "codex_fast": true,
+    "codex_effort": "max",
+    "codex_reset_reminder": null
+  },
+  "agents": [],
+  "completed": []
+}
