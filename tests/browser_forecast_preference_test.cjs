@@ -11,7 +11,18 @@ const home = fs.mkdtempSync(path.join(os.tmpdir(), 'murmuratio-forecast-'));
 const config = path.join(home, 'config.toml');
 fs.writeFileSync(config, '[modules]\nforecast=true\nrouting=true\ncodex_credits=true\nbranding=true\n');
 const snapshot = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/forecast-board.json')));
-const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import main; main()', '--port', '0', '--config', config],
+const program = `
+import faulthandler
+faulthandler.dump_traceback_later(10, repeat=True)
+import murmuratio_app.server as server
+class FixtureServer(server.ThreadingHTTPServer):
+    def serve_forever(self, *args, **kwargs):
+        faulthandler.cancel_dump_traceback_later()
+        return super().serve_forever(*args, **kwargs)
+server.ThreadingHTTPServer = FixtureServer
+server.main()
+`;
+const service = spawn('python3', ['-B', '-c', program, '--port', '0', '--config', config],
   {cwd: root, env: {...process.env, HOME: home, CODEX_HOME: path.join(home, 'codex'), PORTLESS_URL: ''}, stdio: ['ignore', 'pipe', 'pipe']});
 (async () => {
   let browser;
