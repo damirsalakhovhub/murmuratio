@@ -255,9 +255,15 @@ const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import
     const facts = () => page.$$eval('.now-forecast-fact-label', es => es.map(e => e.textContent));
     assert.deepEqual(await facts(), ['Work split today', 'Codex credits', 'To last until reset', 'Work hours']);
     // Charts go away from the header toggle and come back; the choice survives a reload.
-    await page.click('#charts-toggle');
-    // The block folds with an animation first, then leaves the layout.
-    assert.equal(await page.$eval('#now-forecast', e => e.getAnimations().length), 1);
+    await page.emulateMediaFeatures([{name: 'prefers-color-scheme', value: 'light'},
+      {name: 'prefers-reduced-motion', value: 'no-preference'}]);
+    // Observe the start in the click's task: a CI round trip can outlast the 150ms animation.
+    const folding = await page.$eval('#charts-toggle', button => {
+      button.click();
+      const charts = document.getElementById('now-forecast');
+      return {animations: charts.getAnimations().length, hidden: charts.hidden};
+    });
+    assert.deepEqual(folding, {animations: 1, hidden: false});
     await page.waitForFunction(() => document.getElementById('now-forecast').hidden);
     assert.equal(await page.$eval('#charts-toggle', e => e.getAttribute('aria-pressed')), 'false');
     await page.click('#charts-toggle');
