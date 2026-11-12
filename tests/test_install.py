@@ -54,7 +54,7 @@ class InstallTests(unittest.TestCase):
         result = subprocess.run([sys.executable, str(ROOT / 'murmuratio'), '--version'],
                                 cwd=self.home, env=self.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), 'murmuratio 0.2.0-beta')
+        self.assertEqual(result.stdout.strip(), 'murmuratio 0.3.0-beta')
         self.assertEqual(self.tree(), {})
 
     def test_no_existing_statusline_and_uninstall_twice(self):
@@ -169,6 +169,14 @@ class InstallTests(unittest.TestCase):
         self.assertIn('statusLine', json.loads(self.paths.settings.read_bytes()))
         self.assertEqual(self.cli('uninstall').returncode, 0)
         self.assertEqual(self.paths.settings.read_bytes(), original)
+
+    def test_integrations_upgrade_journals_claude_directory_creation(self):
+        self.assertEqual(self.cli('install').returncode, 0)
+        self.assertFalse(self.paths.settings.parent.exists())
+        self.assertEqual(self.cli('install', '--integrations').returncode, 0)
+        self.assertTrue(self.paths.settings.parent.exists())
+        self.assertEqual(self.cli('uninstall').returncode, 0)
+        self.assertFalse(self.paths.settings.parent.exists())
 
     def test_interrupted_late_hook_install_recovers_before_and_after_settings_write(self):
         for stop in ('before', 'after'):

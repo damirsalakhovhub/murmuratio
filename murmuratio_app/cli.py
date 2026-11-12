@@ -107,17 +107,17 @@ def status_spans(text):
         pos += 1
 
 
-def status_value(raw):
+def status_value(raw, property_name='statusLine'):
     text = raw.decode('utf-8')
     entries, _ = status_spans(text)
-    return next((text[start:end] for key, _, start, end, _ in entries if key == 'statusLine'), None)
+    return next((text[start:end] for key, _, start, end, _ in entries if key == property_name), None)
 
 
-def patch_status(raw, replacement):
+def patch_status(raw, replacement, property_name='statusLine'):
     text = raw.decode('utf-8')
     entries, closing = status_spans(text)
     for index, (key, start, value_start, value_end, previous_comma) in enumerate(entries):
-        if key != 'statusLine':
+        if key != property_name:
             continue
         if replacement is not None:
             return (text[:value_start] + replacement + text[value_end:]).encode()
@@ -126,7 +126,7 @@ def patch_status(raw, replacement):
         return (text[:previous_comma if previous_comma is not None else start] + text[value_end:]).encode()
     if replacement is None:
         return raw
-    addition = (', ' if entries else '') + '"statusLine": ' + replacement
+    addition = (', ' if entries else '') + json.dumps(property_name) + ': ' + replacement
     return (text[:closing] + addition + text[closing:]).encode()
 
 
@@ -248,6 +248,7 @@ def read_plan(paths, config, demo=False, config_path=None):
     for path in (config_path or paths.config, found.claude_limits, found.claude_limits_legacy,
                  found.claude_sessions / '*/*.jsonl', found.claude_sessions / '*/*/subagents/*.jsonl',
                  found.claude_sessions / '*/*/subagents/*.meta.json', found.agents_registry,
+                 found.integration_registry,
                  found.claude_desktop / '*/*/local_*.json',
                  found.codex_rollouts / '*/*/*/rollout-*.jsonl'):
         if path is not None:
@@ -377,10 +378,25 @@ def validate_install(paths, args):
 
 
 def install(paths, args):
+    integrations = getattr(args, 'integrations', False)
+    if integrations:
+        from murmuratio_app.hooks import preflight_integrations
+        preflight_integrations(paths)
     state, original, settings, config = validate_install(paths, args)
+    create_claude = (integrations or getattr(args, 'statusline', False)) and not paths.settings.parent.exists()
     if args.dry_run:
         installation_plan(paths, config, args, state, original)
+        if integrations:
+            from murmuratio_app.hooks import install_integrations
+            install_integrations(paths, dry_run=True)
         return
+    if create_claude:
+        if state is not None:
+            created_dirs = set(state.get('created_dirs', []))
+            created_dirs.add('.claude')
+            state['created_dirs'] = sorted(created_dirs)
+            save_state(paths, state)
+        paths.settings.parent.mkdir(mode=0o700, parents=True)
     if state is None:
         use_hook = paths.settings.parent.is_dir()
         command = wrapper_command(old_command(settings)) if use_hook else ''
@@ -391,6 +407,8 @@ def install(paths, args):
         created = sorted({str(folder.relative_to(paths.home)) for top in (paths.install, paths.config_dir)
                           for folder in (top, *top.parents) if folder.is_relative_to(paths.home)
                           and folder != paths.home and not folder.exists()})
+        if create_claude:
+            created.append('.claude')
         state = {'version': 1, 'settings_existed': original is not None, 'command': command, 'created_dirs': created,
                  'installed_settings_sha': sha(new_settings) if use_hook else '', 'created_config': not paths.config.exists(),
                  'backup_sha': sha(original) if original is not None else None, 'hook_installed': use_hook}
@@ -464,6 +482,9 @@ def install(paths, args):
     if args.launch_agent and not state.get('agent_sha'):
         add_agent(paths, state, args.port)
         print(f'Loaded LaunchAgent: {LABEL}')
+    if integrations:
+        from murmuratio_app.hooks import install_integrations
+        install_integrations(paths)
 
 
 def remove_installation_files(paths):
@@ -495,13 +516,24 @@ def remove_installation_files(paths):
                 raise
 
 
-def uninstall(paths, args):
+def uninstall(paths, args, _skip_integrations=False):
     state = load_state(paths)
     for directory in (paths.config_dir, paths.data):
         if directory.is_symlink() or directory.exists() and not directory.is_dir():
             raise InstallError(f'Refusing to remove non-directory or symlink: {directory}')
     if state is not None and paths.install.is_symlink():
         raise InstallError(f'Refusing to use installation directory symlink: {paths.install}')
+    if not _skip_integrations:
+        from murmuratio_app.agent_registry import registry_path
+        from murmuratio_app.hooks import journal_path, uninstall_integrations
+        if journal_path(paths).exists() or registry_path(paths.home).exists():
+            # Validate the statusLine backup, recovery state and LaunchAgent before
+            # removing any integration hooks or metadata.
+            from contextlib import redirect_stdout
+            import io
+            with redirect_stdout(io.StringIO()):
+                uninstall(paths, argparse.Namespace(dry_run=True), _skip_integrations=True)
+        uninstall_integrations(paths, getattr(args, 'keep_integration_data', False), args.dry_run)
     if state is None:
         print('No installation record; existing files retained.')
         return
@@ -645,10 +677,35 @@ def main(argv=None):
     parser = PlainArgumentParser(description=__doc__)
     parser.add_argument('--version', action='version', version=f'murmuratio {__version__}')
     commands = parser.add_subparsers(dest='command', required=True)
+    agent_parser = commands.add_parser('agent', help='Register an explicit orchestration identity')
+    agent_commands = agent_parser.add_subparsers(dest='agent_command', required=True)
+    register_parser = agent_commands.add_parser('register')
+    register_parser.add_argument('--kind', choices=('claude', 'codex'), required=True)
+    register_parser.add_argument('--id', required=True)
+    register_parser.add_argument('--role', choices=('orchestrator',), required=True)
+    register_parser.add_argument('--name', required=True)
+    register_parser.add_argument('--subagent-id')
+    spawn_parser = commands.add_parser('spawn', help='Launch a worker with an exact parent link')
+    spawn_parser.add_argument('--to', choices=('claude', 'codex'), required=True)
+    spawn_parser.add_argument('--title', required=True)
+    spawn_parser.add_argument('--model', required=True)
+    spawn_parser.add_argument('--effort', required=True)
+    spawn_parser.add_argument('--parent-kind', choices=('claude', 'codex'), required=True)
+    spawn_parser.add_argument('--parent-id', required=True)
+    spawn_parser.add_argument('--parent-subagent-id')
+    spawn_parser.add_argument('--cwd', type=Path)
+    spawn_parser.add_argument('--sandbox', choices=('read-only', 'workspace-write'))
+    spawn_parser.add_argument('--permission-mode', choices=('manual', 'acceptEdits', 'dontAsk', 'plan'))
+    spawn_parser.add_argument('brief_file', type=Path)
+    hook_parser = commands.add_parser('hook', help='Handle an optional provider lifecycle event')
+    hook_parser.add_argument('provider', choices=('claude',))
     install_parser = commands.add_parser('install')
+    install_parser.add_argument('--integrations', action='store_true', help='Install optional Claude hooks and orchestration skill')
+    install_parser.add_argument('--statusline', action='store_true', help='Install the statusLine even if Claude is not set up yet')
     install_parser.add_argument('--launch-agent', action='store_true', help='Also install and load a macOS LaunchAgent')
     install_parser.add_argument('--port', type=port_number, default=8765)
     uninstall_parser = commands.add_parser('uninstall')
+    uninstall_parser.add_argument('--keep-integration-data', action='store_true', help='Keep integration registry metadata')
     doctor_parser = commands.add_parser('doctor')
     check_parser = commands.add_parser('check-update', help='Compare this code with a running local board')
     check_parser.add_argument('--url', default='http://127.0.0.1:8765', help='Running local board URL')
@@ -664,7 +721,17 @@ def main(argv=None):
     args = parser.parse_args(argv)
     paths = Paths(Path.home())
     try:
-        if args.command == 'install':
+        if args.command == 'agent':
+            from murmuratio_app.agent_registry import AgentRegistry
+            record = AgentRegistry(paths.home).register(args.kind, args.id, args.name, args.subagent_id)
+            print(json.dumps(record, allow_nan=False))
+        elif args.command == 'hook':
+            from murmuratio_app.hooks import claude_hook
+            return claude_hook(paths.home)
+        elif args.command == 'spawn':
+            from murmuratio_app.spawn import spawn
+            return spawn(paths.home, args)
+        elif args.command == 'install':
             install(paths, args)
         elif args.command == 'uninstall':
             uninstall(paths, args)

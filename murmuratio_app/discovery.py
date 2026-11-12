@@ -17,6 +17,7 @@ class Discovery:
     claude_limits: Path
     claude_limits_legacy: Path | None
     agents_registry: Path
+    integration_registry: Path
 
     @classmethod
     def at(cls, home, config, codex_home=None):
@@ -33,4 +34,5 @@ class Discovery:
             claude_limits_legacy=config.claude_limits_extra,
             # Launch wrappers append who each agent is; the board reads it, never writes it.
             agents_registry=config.agents_registry or home / '.claude/tools/agents-registry.jsonl',
+            integration_registry=home / '.local/share/murmuratio/agents.jsonl',
         )

@@ -11,7 +11,9 @@ assert.equal(context.sessionTitleDisplay('film: X'), 'film: X');
 assert.equal(context.sessionTitleDisplay('↳film: X'), '→ film: X');
 assert.equal(context.sessionTitleDisplay('↳   film: X'), '→ film: X');
 assert.equal(context.sessionTitleDisplay('film: ↳ X'), 'film: ↳ X');
-console.log('Session title display: 5 cases passed');
+assert.equal(context.sessionTitleDisplay('↳   Keep title exactly', 'launcher'), '↳   Keep title exactly');
+assert.equal(context.sessionTitleDisplay('Mode:   Keep title exactly', 'launcher'), 'Mode:   Keep title exactly');
+console.log('Session title display: 7 cases passed');
 
 assert.equal(context.modelLabel({kind: 'codex', model: 'gpt-6.1-sol', effort: 'high'}), 'Sol high');
 assert.equal(context.modelLabel({kind: 'claude', model: 'claude-opus-5-5', effort: 'xhigh'}), 'Opus 5.5 xhigh');

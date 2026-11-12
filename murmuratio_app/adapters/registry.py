@@ -11,6 +11,7 @@ from pathlib import Path
 
 from murmuratio_app.adapters.base import AbsentSource, Adapter
 from murmuratio_app.common import one_line
+from murmuratio_app.agent_registry import FIELDS, validate
 
 MAX_LINE = 64 * 1024
 TEXT_FIELDS = {'project': 160, 'role': 40, 'name': 240, 'parent_id': 200, 'app_id': 200, 'cwd': 1024}
@@ -20,6 +21,11 @@ def parse_record(raw):
     """A normalized record, or None when the line is not a usable registry record."""
     if not isinstance(raw, dict):
         return None
+    if raw.get('via') in ('launcher', 'manual', 'hook') and 'provider_id' in raw:
+        try:
+            return validate({key: raw.get(key) for key in FIELDS})
+        except (ValueError, TypeError, KeyError):
+            return None
     record_id, kind = one_line(raw.get('id')), one_line(raw.get('kind')).lower()
     if not record_id or not kind:
         return None

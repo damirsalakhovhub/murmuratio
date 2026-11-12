@@ -103,6 +103,7 @@ class Config:
     claude_limits_extra: Path | None = None
     codex_resets: tuple = ()
     agents_registry: Path | None = None
+    # integrations always own a separate registry; agents_registry retains its legacy meaning.
     mark_guessed: bool = False
     context_high_percent: int = 80
     routing_policy: RoutingPolicy = field(default_factory=RoutingPolicy)

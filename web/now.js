@@ -1,6 +1,7 @@
 'use strict';
 const BOARD_REFRESH_MS = 3000;
-function sessionTitleDisplay(title = '') {
+function sessionTitleDisplay(title = '', source = null) {
+  if (source === 'launcher') return title;
   return title.replace(/^↳ */, '→ ');
 }
 
@@ -981,7 +982,7 @@ window.createNowView = ({node, text}) => {
     else if (agent.follows) view.el.title = 'Follows ' + agent.follows;
     else view.el.removeAttribute('title');
     text(view.who, agent.orchestrator ? 'Orchestrator' : agent.agent_type || agent.folder);
-    text(view.model, modelLabel(agent)); text(view.task, sessionTitleDisplay(agent.task));
+    text(view.model, modelLabel(agent)); text(view.task, sessionTitleDisplay(agent.task, agent.title_source));
     view.guessed.hidden = agent.guessed !== true;
     const [word, detail] = paintStatus(view.status, view.action, agent);
     tip(view.status, {title: word || 'Status', note: detail});
@@ -1045,7 +1046,7 @@ window.createNowView = ({node, text}) => {
     const state = node('div', 'now-panel-state now-status'), action = node('span', 'now-action');
     state.append(node('span', 'now-dot'), action);
     paintStatus(state, action, agent);
-    const parts = [head, node('h3', 'now-panel-task', sessionTitleDisplay(agent.task || 'Untitled')), state];
+    const parts = [head, node('h3', 'now-panel-task', sessionTitleDisplay(agent.task || 'Untitled', agent.title_source)), state];
     if (brief.request) {
       const request = node('p', 'now-panel-request', brief.request); request.title = brief.request;
       parts.push(panelSection('Last request', request));

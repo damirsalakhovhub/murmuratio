@@ -324,7 +324,7 @@ class CodexBoardAdapter(Adapter):
         root = self.root.resolve()
         names = self.names()
         orchestrators = frozenset({thread for thread, name in names.items() if orchestrator_name(name)}
-                                 | {thread for thread, record in (registry or {}).items()
+                                 | {record.get('provider_id') or thread for thread, record in (registry or {}).items()
                                     if record.get('kind') == 'codex' and record.get('role') == 'orchestrator'})
         for path in self.files('*/*/*/rollout-*.jsonl'):
             try:

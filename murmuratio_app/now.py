@@ -10,7 +10,7 @@ import time
 from murmuratio_app.config import Config
 from murmuratio_app.naming import name_fields
 from murmuratio_app.common import active_today, local_day, pid_alive
-from murmuratio_app.grouping import board_parents, board_sessions, retain_agents, link_parents as group_parents, merge_codex_sources
+from murmuratio_app.grouping import board_parents, board_sessions, retain_agents, link_parents as group_parents, merge_codex_sources, integration_cards
 from murmuratio_app.health import assignment_health, limits_health
 from murmuratio_app.history import (append_routing_history, read_routing_history, read_limit_history,
                                    limit_history_additions, replace_text)
@@ -90,6 +90,8 @@ class NowSource:
         self.claude_usage_adapter = ClaudeUsageAdapter(paths.claude_sessions)
         self.codex_meter_adapter = CodexMeterAdapter(paths.codex_rollouts)
         self.registry_adapter = AgentsRegistryAdapter(paths.agents_registry)
+        self.integration_registry_adapter = AgentsRegistryAdapter(paths.integration_registry)
+        self.integration_registry_adapter.name = 'integration_registry'
         self.source_statuses = {}
         self.source_reasons = {}
         self.board_by_thread = {}
@@ -319,14 +321,15 @@ class NowSource:
             agents.extend(claude)
             for path in set(self.cache) - seen:
                 del self.cache[path]
-            linked = self.link_parents(agents + completed, desktop, registry)
+            linked = self.link_parents(integration_cards(agents + completed, registry, now, self.project), desktop, registry)
             for agent in linked:
                 agent.pop('has_eligible_children', None)
                 agent['context_window'] = model_context_window(agent, agent.get('model'))
                 agent.update(context_signal(agent, self.config.context_high_percent))
                 agent['model'] = agent.get('model') or None
                 agent['effort'] = agent.get('effort') or None
-                agent.update(name_fields(titles=[(agent.get('title_source'), agent.get('task'))], project=agent.get('project', '')))
+                if agent.get('title_source') != 'launcher':
+                    agent.update(name_fields(titles=[(agent.get('title_source'), agent.get('task'))], project=agent.get('project', '')))
             completed = [a for a in linked if a.get('completed') and (a['kind'] != 'codex'
                          or now - (a.get('ended') or a.get('last_at') or 0) < HISTORY_SECONDS)]
             agents = retain_agents([a for a in linked if not a.get('completed')], now)
@@ -488,7 +491,15 @@ class NowSource:
 
     def registry(self):
         """Registry id to its latest record; empty when the file does not exist yet."""
-        return {record['id']: record for record in self._read_adapter(self.registry_adapter)}
+        legacy = {record['id']: record for record in self._read_adapter(self.registry_adapter)}
+        owned = self.integration_registry_adapter.read()
+        if owned.status not in ('available', 'absent'):
+            self.source_statuses['integration_registry'] = owned.status
+            self.source_reasons['integration_registry'] = owned.reason
+        if owned.status == 'available' and self.source_statuses.get('agents_registry') == 'absent':
+            self.source_statuses['agents_registry'] = 'available'
+        legacy.update({'integration:' + r['id']: r for r in owned.values()})
+        return legacy
 
     def link_parents(self, agents, desktop, registry=None):
         config = self.config

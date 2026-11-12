@@ -4,6 +4,98 @@ import os
 from murmuratio_app.common import active_today
 from murmuratio_app.naming import name_fields, orchestrator_name
 from murmuratio_app.schema import DesktopSession, Session
+from murmuratio_app.agent_registry import card_id, identity, process_matches, TERMINAL
+
+
+def integration_cards(agents, registry, now, project):
+    """Join owned snapshots by provider identity; expose launches even without a transcript."""
+    by_identity = {}
+    for agent in agents:
+        provider_id = (agent.get('thread') if agent['kind'] == 'codex' else
+                       agent['id'].removeprefix('claude:').split(':agent-', 1)[0])
+        by_identity[(agent['kind'], provider_id, agent.get('subagent_id'))] = agent
+    for record in registry.values():
+        if 'provider_id' not in record:
+            continue
+        key = identity(record)
+        agent = by_identity.get(key) if record['provider_id'] else None
+        if agent is None:
+            cwd = record.get('cwd') or ''
+            agent = dict(id=card_id(record['kind'], record['provider_id'] or record['id'], record['subagent_id']),
+                         kind=record['kind'], thread=record['provider_id'] if record['kind'] == 'codex' else None,
+                         who=record['kind'].title(), cwd=cwd, folder=Path(cwd).name or '—',
+                         project=project(cwd) if cwd else 'Unknown', task=record.get('name') or 'Untitled',
+                         status='unknown', started=record['started_at'], ended=None, last_at=record['started_at'],
+                         seconds=0, current_action='', parent_id=None, parent_session='',
+                         context_tokens=None, context_used=None, model=None, effort=None, completed=False)
+            if record['subagent_id']:
+                agent['subagent_id'] = record['subagent_id']
+                agent['parent_session'] = record['provider_id']
+            agents.append(agent)
+            by_identity[key] = agent
+        agent.update(registered=True, role=record['role'], registry_status=record['status'],
+                     model_requested=record['model_requested'], effort_requested=record['effort_requested'],
+                     exit_code=record['exit_code'], _registry_via=record['via'])
+        agent['_explicit_nested_orchestrator'] = record['role'] == 'orchestrator' and bool(record['parent_id'])
+        if (record['via'] == 'manual' and record['role'] == 'orchestrator'
+                and record['status'] == 'running' and record['ended_at'] is None
+                and agent.get('status') == 'done'):
+            agent.update(completed=True, ended=agent.get('last_at'))
+        for field in ('model', 'effort'):
+            agent[field] = agent.get(field) or record[field]
+        # The launcher's process result is authoritative even when a provider's final event is missing.
+        if record['via'] == 'launcher' or record['ended_at'] is not None:
+            status = record['status']
+            if status in ('starting', 'running'):
+                matches = process_matches(record)
+                starting_grace = status == 'starting' and now - (record['started_at'] or 0) < 10
+                if matches is False or matches is None and not starting_grace:
+                    status = 'unknown'
+            agent.update(registry_status=status, status={'starting': 'working', 'running': 'working',
+                         'done': 'done', 'failed': 'crashed', 'interrupted': 'crashed', 'unknown': 'unknown'}[status],
+                         completed=status in TERMINAL, ended=record['ended_at'])
+            agent['last_at'] = record['ended_at'] or agent.get('last_at') or record['started_at']
+    return agents
+
+
+def apply_integrations(agents, registry):
+    records = {identity(r): r for r in registry.values() if 'provider_id' in r and r.get('provider_id')}
+    by_identity = {}
+    owned_ids = set()
+    for agent in agents:
+        provider = agent.get('thread') if agent['kind'] == 'codex' else agent['id'].removeprefix('claude:').split(':agent-', 1)[0]
+        by_identity[(agent['kind'], provider, agent.get('subagent_id'))] = agent
+    for agent in agents:
+        provider = agent.get('thread') if agent['kind'] == 'codex' else agent['id'].removeprefix('claude:').split(':agent-', 1)[0]
+        record = records.get((agent['kind'], provider, agent.get('subagent_id')))
+        if not record:
+            # A Codex launch can fail before reporting a provider ID.
+            record = next((r for r in registry.values() if 'provider_id' in r and not r['provider_id']
+                           and agent['id'] == card_id(r['kind'], r['id'])), None)
+        if not record:
+            continue
+        owned_ids.add(agent['id'])
+        agent['registered'] = True
+        agent.pop('guessed', None)
+        if record.get('name'):
+            if record['via'] == 'launcher':
+                agent.update(task=record['name'], title_source='launcher')
+            else:
+                agent.update(name_fields(titles=[('registry', record['name'])]))
+        if record['role'] is not None:
+            agent['orchestrator'] = record['role'] == 'orchestrator'
+            if agent['kind'] == 'codex':
+                agent['codex_role'] = record['role']
+        if record['parent_id']:
+            parent = by_identity.get((record['parent_kind'], record['parent_id'], record['parent_subagent_id']))
+            exact_id = card_id(record['parent_kind'], record['parent_id'], record['parent_subagent_id'])
+            agent.update(parent_id=parent['id'] if parent is not None and parent is not agent else exact_id,
+                         parent_session=record['parent_id'], parent_app_session='', link='exact')
+            if parent is not None and parent is not agent:
+                agent['project'] = parent['project']
+        elif record['subagent_id']:
+            agent.update(parent_id=card_id(record['kind'], record['provider_id']), link='exact')
+    return owned_ids
 
 def board_parents(agents, now, candidates=None):
     """Parents with an unfinished child or a child finished on the current local day."""
@@ -47,6 +139,8 @@ def retain_agents(agents: list[Session], now: float) -> list[Session]:
                 and agent.get('orchestrator') and agent['status'] == 'waiting')
             or (agent.get('kind') != 'claude' and active_today(agent.get('last_at'), now))
             or now - (agent.get('ended') or agent.get('waiting_since') or agent.get('last_at') or 0) < 1800}
+    keep.update(agent['id'] for agent in agents if agent.get('registered') and agent.get('orchestrator')
+                and not agent.get('completed'))
     pending = [agent['id'] for agent in agents if agent['id'] in keep and (
         agent['status'] in ('working', 'hung') or
         agent['status'] == 'blocked' and agent.get('current_action') == 'waiting for approval')]
@@ -76,6 +170,7 @@ def merge_handoffs(agents, aliases):
         old = by_id.get(agent.get('parent_id'))
         old = successor(old) if old else None
         if (old and old is not agent and not agent.get('subagent_id')
+                and not (agent.get('_explicit_nested_orchestrator') or old.get('_explicit_nested_orchestrator'))
                 and orchestrator_name(agent['task']) and agent['task'] == old['task']):
             replaced[old['id']] = agent
             agent['parent_id'], agent['parent_session'] = old['parent_id'], old['parent_session']
@@ -379,6 +474,8 @@ def apply_registry(agents, registry, mark_guessed=False, columns=()):
     columns: the board's known column names, so a registry project stem maps onto them."""
     if registry is None:
         return
+    integrations = {key: r for key, r in registry.items() if 'provider_id' in r}
+    registry = {key: r for key, r in registry.items() if 'provider_id' not in r}
     columns = list(dict.fromkeys([*columns, *(agent.get('project') for agent in agents)]))
     # A Claude app id (local_…) stands for the CLI session whose record carries it as app_id.
     by_app = {record['app_id']: record for record in registry.values() if record.get('app_id')}
@@ -444,6 +541,7 @@ def apply_registry(agents, registry, mark_guessed=False, columns=()):
             # Missing or unresolved registry parents keep the heuristic relationship.
         if record.get('project'):
             agent['project'] = registry_column(record['project'], columns)
+    owned_ids = apply_integrations(agents, integrations)
     by_id = {agent['id']: agent for agent in agents}
     # Registry parents can form a cycle; break it rather than hide a column.
     for agent in agents:
@@ -466,9 +564,17 @@ def apply_registry(agents, registry, mark_guessed=False, columns=()):
                 break
             current = parent
         agent['project'] = current['project']
+    for agent in agents:
+        if agent['id'] not in owned_ids:
+            continue
+        seen, current = {agent['id']}, agent
+        while current.get('parent_id') in by_id and current['parent_id'] not in seen:
+            current = by_id[current['parent_id']]
+            seen.add(current['id'])
+        agent['project'] = current['project']
     # A guessed card nested under a registered ancestor follows that ancestor's column.
     for agent in agents:
-        if agent['id'] in registered:
+        if agent['id'] in registered or agent['id'] in owned_ids:
             continue
         seen, current = {agent['id']}, by_id.get(agent.get('parent_id'))
         while current is not None and current['id'] not in seen:
@@ -548,13 +654,23 @@ def link_parents(agents: list[Session], desktop: dict[str, DesktopSession], cloc
         while parent_id in by_id:
             working_ancestors.add(parent_id)
             parent_id = by_id[parent_id].get('parent_id')
-    for agent in claude + [agent for agent in agents if agent['kind'] == 'codex' and agent.get('orchestrator')]:
-        if agent['orchestrator'] and agent['status'] == 'done':
+    for agent in agents:
+        if (agent.get('_registry_via') == 'manual' and agent.get('registry_status') == 'running'
+                and agent.get('ended') is None and agent.get('status') == 'done'):
+            agent.update(completed=True, ended=agent.get('last_at'))
+        if agent.get('_registry_via') in ('manual', 'hook', 'launcher') and agent.get('registry_status') in TERMINAL:
+            agent.update(status={'done': 'done', 'failed': 'crashed', 'interrupted': 'crashed'}[
+                agent['registry_status']], completed=True)
+        is_coordinator = agent['kind'] == 'claude' or (
+            agent['kind'] == 'codex' and agent.get('orchestrator'))
+        if (is_coordinator and agent.get('orchestrator') and agent['status'] == 'done'
+                and agent.get('registry_status') not in TERMINAL
+                and not (agent.get('_registry_via') == 'manual' and agent.get('completed'))):
             agent['status'] = 'waiting'
             agent['ended'] = None
-        if agent['orchestrator'] and agent['status'] == 'waiting' and agent['id'] in working_ancestors:
+        if is_coordinator and agent.get('orchestrator') and agent['status'] == 'waiting' and agent['id'] in working_ancestors:
             agent['status'] = 'idle'
     for agent in agents:
-        for key in ('_codex_launches', '_codex_pending', '_link_ambiguous', '_wrapper', '_pid_known', '_dead_expired', '_rollout', '_run_id', '_turns', '_stopped_seconds', '_parent_thread', '_claude_session', '_effort_recorded', '_context_invalidated'):
+        for key in ('_codex_launches', '_codex_pending', '_link_ambiguous', '_wrapper', '_pid_known', '_dead_expired', '_rollout', '_run_id', '_turns', '_stopped_seconds', '_parent_thread', '_claude_session', '_effort_recorded', '_context_invalidated', '_registry_via', '_explicit_nested_orchestrator'):
             agent.pop(key, None)
     return agents

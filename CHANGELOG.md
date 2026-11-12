@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0-beta — 2026-11-12
+
+### Added
+
+- Optional exact agent links in both cross-provider and same-provider orchestration directions, with explicit caller and native Claude subagent identities.
+- Locked, complete metadata snapshots in a private local registry, alongside the unchanged legacy registry and wrapper readers.
+- `agent register` and `spawn`, with brief input on stdin, literal launcher titles, separate requested/effective model settings, process identity and exit status.
+- Opt-in Claude lifecycle hooks and orchestration skill, journaled installation/removal, and a manually pasted Codex instructions block.
+- Four-direction stub launches verified through the board API, cancellation, concurrent writes, hook failures, and byte-preserving settings recovery tests.
+
 ## 0.2.0-beta — 2026-11-12
 
 ### Removed
