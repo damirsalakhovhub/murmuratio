@@ -6,13 +6,12 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
-from http.server import ThreadingHTTPServer
 from unittest.mock import patch
 
 from tests.test_board_http import BoardHTTPHarness
 from murmuratio_app.config import Config
 from murmuratio_app.now import NowSource, context_signal
-from murmuratio_app.server import make_handler
+from murmuratio_app.server import LocalHTTPServer, make_handler
 
 FIXTURE = Path(__file__).parent / 'fixtures/context-signals.json'
 
@@ -51,7 +50,7 @@ class ContextSignalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             source = NowSource(home, config=Config(), clock=lambda: fixture['now'])
             with patch.object(source, 'link_parents', return_value=copy.deepcopy(fixture['agents'] + fixture['completed'])):
-                server = ThreadingHTTPServer(('127.0.0.1', 0), make_handler(now=source))
+                server = LocalHTTPServer(('127.0.0.1', 0), make_handler(now=source))
                 worker = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': .01}, daemon=True)
                 worker.start()
                 try:

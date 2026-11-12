@@ -11,16 +11,15 @@ const payload = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/contex
 fs.writeFileSync(fixture, JSON.stringify(payload));
 const artifacts = path.join(os.tmpdir(), 'murmuratio-context-verification');
 const program = `import json,sys
-from http.server import ThreadingHTTPServer
 from murmuratio_app.config import Config
 from murmuratio_app.now import context_signal
-from murmuratio_app.server import make_handler
+from murmuratio_app.server import LocalHTTPServer, make_handler
 class Source:
  def state(self):
   with open(sys.argv[1]) as f: value=json.load(f)
   for card in value['agents']+value['completed']: card.update(context_signal(card, Config.context_high_percent))
   return value
-server=ThreadingHTTPServer(('127.0.0.1',0),make_handler(now=Source()))
+server=LocalHTTPServer(('127.0.0.1',0),make_handler(now=Source()))
 print('http://127.0.0.1:'+str(server.server_port),flush=True)
 server.serve_forever()`;
 const service = spawn('python3', ['-B', '-c', program, fixture], {cwd: path.join(__dirname, '..'),

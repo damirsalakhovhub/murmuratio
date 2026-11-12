@@ -5,9 +5,9 @@ from pathlib import Path
 import threading
 from types import SimpleNamespace
 import unittest
-from http.server import ThreadingHTTPServer
+from unittest.mock import patch
 
-from murmuratio_app.server import make_handler, sanitize
+from murmuratio_app.server import LocalHTTPServer, main, make_handler, sanitize
 
 
 CROSS_SITE_NAVIGATION = {'Sec-Fetch-Site': 'cross-site',
@@ -17,7 +17,7 @@ CROSS_SITE_NAVIGATION = {'Sec-Fetch-Site': 'cross-site',
 class ServerTests(unittest.TestCase):
     def setUp(self):
         self.now = SimpleNamespace(state=lambda: {'agents': [], 'completed': []})
-        self.http = ThreadingHTTPServer(('127.0.0.1', 0), make_handler(now=self.now))
+        self.http = LocalHTTPServer(('127.0.0.1', 0), make_handler(now=self.now))
         self.thread = threading.Thread(target=self.http.serve_forever, daemon=True)
         self.thread.start()
 
@@ -141,6 +141,23 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn(secret, encoded)
         self.assertEqual(result['safe'], 'visible')
         self.assertEqual(original['access_token'], 'private')
+
+
+class ServerStartupTests(unittest.TestCase):
+    def test_startup_never_resolves_the_loopback_hostname(self):
+        import io
+        from contextlib import redirect_stdout
+
+        def serve(server):
+            self.assertEqual(server.server_name, '127.0.0.1')
+            self.assertEqual(server.server_port, server.socket.getsockname()[1])
+            self.assertGreater(server.server_port, 0)
+
+        with patch('socket.getfqdn', side_effect=AssertionError('Local startup must not use DNS')), \
+                patch.object(LocalHTTPServer, 'serve_forever', autospec=True, side_effect=serve) as run, \
+                redirect_stdout(io.StringIO()):
+            main(['--demo', '--port', '0'])
+        run.assert_called_once()
 
 
 class RoutingRefreshTests(unittest.TestCase):

@@ -1,6 +1,5 @@
 """Provider-file fixtures shared by the reset regressions and the real HTTP browser check."""
 from datetime import datetime
-from http.server import ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
@@ -16,7 +15,7 @@ if str(ROOT) not in sys.path:
 from murmuratio_app.config import Config
 from tests.routing_fixture import example_policy
 from murmuratio_app.now import NowSource
-from murmuratio_app.server import make_handler
+from murmuratio_app.server import LocalHTTPServer, make_handler
 
 FIXTURE = json.loads((ROOT / 'tests/fixtures/any-hour.json').read_text())
 START = datetime.fromisoformat(FIXTURE['week_start']).timestamp()
@@ -96,7 +95,7 @@ def main():
                     return
                 super().do_GET()
 
-        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        server = LocalHTTPServer(('127.0.0.1', 0), Handler)
         print(f'http://127.0.0.1:{server.server_port}', flush=True)
         try:
             server.serve_forever()

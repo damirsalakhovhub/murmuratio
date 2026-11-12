@@ -7,6 +7,7 @@ import re
 import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 from urllib.parse import urlsplit
 from murmuratio_app.common import PlainArgumentParser
 
@@ -32,6 +33,14 @@ def sanitize(value):
 
 
 ROUTING_REFRESH_SECONDS = 60
+
+
+class LocalHTTPServer(ThreadingHTTPServer):
+    """Bind the local address without a potentially blocking reverse DNS lookup."""
+
+    def server_bind(self):
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 def keep_routing_fresh(source, interval=ROUTING_REFRESH_SECONDS, stop=None):
@@ -177,7 +186,7 @@ def main(argv=None):
         if config.modules['routing']:
             keep_routing_fresh(now)
     public_url = os.environ.get('PORTLESS_URL')
-    server = ThreadingHTTPServer(('127.0.0.1', args.port), make_handler(public_url, now, config))
+    server = LocalHTTPServer(('127.0.0.1', args.port), make_handler(public_url, now, config))
     print(f'Murmuratio: http://127.0.0.1:{server.server_port}', flush=True)
     try:
         server.serve_forever()

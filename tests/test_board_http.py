@@ -7,13 +7,12 @@ import tempfile
 import threading
 import time
 import unittest
-from http.server import ThreadingHTTPServer
 from unittest.mock import patch
 
 from tests.board_fixture_helpers import fixture_parent
 from murmuratio_app.config import Config
 from murmuratio_app.now import NowSource
-from murmuratio_app.server import make_handler, sanitize
+from murmuratio_app.server import LocalHTTPServer, make_handler, sanitize
 
 
 class BoardHTTPHarness(unittest.TestCase):
@@ -32,7 +31,7 @@ class BoardHTTPHarness(unittest.TestCase):
     def start_server(self):
         source = NowSource(home=self.home, codex_home=self.codex_home, config=self.config,
                            clock=lambda: self.now, sanitize=sanitize)
-        server = ThreadingHTTPServer(('127.0.0.1', 0), make_handler(now=source, config=self.config))
+        server = LocalHTTPServer(('127.0.0.1', 0), make_handler(now=source, config=self.config))
         thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': 0.01}, daemon=True)
         thread.start()
         self.addCleanup(server.server_close)

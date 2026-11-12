@@ -6,13 +6,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const fixture = `
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from murmuratio_app.config import Config
 from murmuratio_app.now import NowSource
-from murmuratio_app.server import make_handler
+from murmuratio_app.server import LocalHTTPServer, make_handler
 from tests.test_calculator import at
 from tests.routing_fixture import example_policy
 with TemporaryDirectory() as home:
@@ -41,7 +40,7 @@ with TemporaryDirectory() as home:
                 selected[0]=self.path.removeprefix('/fixture/')
                 self.send_response(204);self.end_headers();return
             super().do_GET()
-    server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+    server=LocalHTTPServer(('127.0.0.1',0),Handler)
     print('http://127.0.0.1:'+str(server.server_port),flush=True)
     try: server.serve_forever()
     finally: server.server_close()

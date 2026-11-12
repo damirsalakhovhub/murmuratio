@@ -8,7 +8,6 @@ import tempfile
 import threading
 import time
 import unittest
-from http.server import ThreadingHTTPServer
 from datetime import datetime
 from unittest.mock import patch
 
@@ -18,7 +17,7 @@ from tests.board_fixture_helpers import fixture_parent
 from murmuratio_app.config import Config, MODULES
 from tests.routing_fixture import example_policy
 from murmuratio_app.now import NowSource
-from murmuratio_app.server import make_handler
+from murmuratio_app.server import LocalHTTPServer, make_handler
 
 FIXTURES = Path(__file__).resolve().parent / 'fixtures/adapters'
 NOW = 2_000_000
@@ -194,7 +193,7 @@ class AdapterContractTests(unittest.TestCase):
         self.setup_adapter('codex_wrapper', 'good')
         self.setup_adapter('codex_limits', 'good')
         self.config.modules['codex_wrapper'] = True
-        server = ThreadingHTTPServer(('127.0.0.1', 0), make_handler(now=self.source))
+        server = LocalHTTPServer(('127.0.0.1', 0), make_handler(now=self.source))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(thread.join)

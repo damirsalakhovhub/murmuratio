@@ -1,5 +1,4 @@
 """The reset boundary must work through provider files, routing publication and HTTP."""
-from http.server import ThreadingHTTPServer
 from datetime import datetime
 import http.client
 import json
@@ -13,7 +12,7 @@ from types import SimpleNamespace
 from tests.routing_fixture import example_policy
 from tests.timezone_helpers import local_timezone
 from murmuratio_app.metrics.quota import credits_plan, quota_routing, week_forecast
-from murmuratio_app.server import make_handler
+from murmuratio_app.server import LocalHTTPServer, make_handler
 from tests.any_hour_fixture import FIXTURE, START, WEEK, staged_source
 
 
@@ -59,7 +58,7 @@ class AnyHourTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = staged_source(Path(directory), 'fresh')
             source.state()
-            server = ThreadingHTTPServer(('127.0.0.1', 0), make_handler(now=source, config=source.config))
+            server = LocalHTTPServer(('127.0.0.1', 0), make_handler(now=source, config=source.config))
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:

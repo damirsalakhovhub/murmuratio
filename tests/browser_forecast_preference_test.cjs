@@ -15,11 +15,11 @@ const program = `
 import faulthandler
 faulthandler.dump_traceback_later(10, repeat=True)
 import murmuratio_app.server as server
-class FixtureServer(server.ThreadingHTTPServer):
+class FixtureServer(server.LocalHTTPServer):
     def serve_forever(self, *args, **kwargs):
         faulthandler.cancel_dump_traceback_later()
         return super().serve_forever(*args, **kwargs)
-server.ThreadingHTTPServer = FixtureServer
+server.LocalHTTPServer = FixtureServer
 server.main()
 `;
 const service = spawn('python3', ['-B', '-c', program, '--port', '0', '--config', config],

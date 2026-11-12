@@ -6,7 +6,6 @@ from pathlib import Path
 import tempfile
 import threading
 import time
-from http.server import ThreadingHTTPServer
 import unittest
 from unittest.mock import patch
 
@@ -16,6 +15,7 @@ from murmuratio_app.adapters.parsing import consume_codex_meter, consume_usage
 from murmuratio_app.metrics.quota import quota_routing
 from murmuratio_app.grouping import retain_agents
 from murmuratio_app import server
+from murmuratio_app.server import LocalHTTPServer
 
 
 class ConfigTests(unittest.TestCase):
@@ -340,7 +340,7 @@ class ModuleTests(unittest.TestCase):
 class EndpointTests(unittest.TestCase):
     def setUp(self):
         self.config = Config()
-        self.http = ThreadingHTTPServer(('127.0.0.1', 0), server.make_handler(config=self.config))
+        self.http = LocalHTTPServer(('127.0.0.1', 0), server.make_handler(config=self.config))
         self.thread = threading.Thread(target=self.http.serve_forever, daemon=True)
         self.thread.start()
         self.addCleanup(self.close_server)
@@ -397,7 +397,7 @@ class DemoTests(unittest.TestCase):
             if path != fixture:
                 raise AssertionError(f'unexpected file read: {path}')
             return original_open(path, *args, **kwargs)
-        with patch('murmuratio_app.server.ThreadingHTTPServer', FakeServer), \
+        with patch('murmuratio_app.server.LocalHTTPServer', FakeServer), \
              patch.object(Path, 'home', side_effect=AssertionError('home accessed')), \
              patch.object(Path, 'open', guarded_open), \
              patch('sys.argv', ['server.py', '--demo', '--config', '/personal/config.toml',
@@ -423,7 +423,7 @@ class DemoTests(unittest.TestCase):
         def handler(public_url, now, config):
             captured.update(config=config, state=now.state())
             return object()
-        with patch('murmuratio_app.server.ThreadingHTTPServer', FakeServer), patch('murmuratio_app.server.make_handler', side_effect=handler), \
+        with patch('murmuratio_app.server.LocalHTTPServer', FakeServer), patch('murmuratio_app.server.make_handler', side_effect=handler), \
              patch('sys.argv', ['server.py', '--demo']):
             server.main()
         self.assertEqual(captured['config'].modules, Config().modules)

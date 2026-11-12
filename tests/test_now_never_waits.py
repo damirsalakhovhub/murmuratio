@@ -6,12 +6,11 @@ import tempfile
 import threading
 import time
 import unittest
-from http.server import ThreadingHTTPServer
 from unittest.mock import patch
 
 from murmuratio_app.config import Config
 from murmuratio_app.now import NowSource
-from murmuratio_app.server import make_handler
+from murmuratio_app.server import LocalHTTPServer, make_handler
 
 LIMIT = 1.5
 
@@ -22,7 +21,7 @@ class SlowBoardTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.home = Path(tmp.name)
         self.source = NowSource(self.home)
-        self.http = ThreadingHTTPServer(('127.0.0.1', 0), make_handler(now=self.source, config=self.source.config))
+        self.http = LocalHTTPServer(('127.0.0.1', 0), make_handler(now=self.source, config=self.source.config))
         threading.Thread(target=self.http.serve_forever, daemon=True).start()
         self.addCleanup(self.http.server_close)
         self.addCleanup(self.http.shutdown)

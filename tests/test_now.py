@@ -9,7 +9,6 @@ import tempfile
 import threading
 import time
 import unittest
-from http.server import ThreadingHTTPServer
 
 from tests.board_fixture_helpers import fixture_parent
 from tests.routing_fixture import example_policy
@@ -21,7 +20,7 @@ from murmuratio_app.adapters.limits import limit_window
 from murmuratio_app.common import pid_alive, timestamp
 from murmuratio_app.metrics.quota import (balance_at, codex_burn, credits_plan, credit_month, credit_spend, credit_spent_per_day, credits_expiry,
                                           quota_routing, week_forecast, weekly_pace)
-from murmuratio_app.server import make_handler, sanitize
+from murmuratio_app.server import LocalHTTPServer, make_handler, sanitize
 
 
 class NowTests(unittest.TestCase):
@@ -788,7 +787,7 @@ class NowTests(unittest.TestCase):
     def test_http_snapshot_and_same_origin_security(self):
         self.claude()
         self.write_run(title='<script>window.pwned=1</script> sk-abcdefghijklmnop')
-        server = ThreadingHTTPServer(('127.0.0.1', 0), make_handler(now=self.source))
+        server = LocalHTTPServer(('127.0.0.1', 0), make_handler(now=self.source))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(server.server_close)
