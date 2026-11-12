@@ -10,7 +10,10 @@ permissions:
 jobs:
   test:
     runs-on: macos-latest
+    env:
+      TZ: UTC
     strategy:
+      fail-fast: false
       matrix:
         python-version: ['3.11', '3.13']
     steps:
@@ -22,6 +25,9 @@ jobs:
 
   browser:
     runs-on: macos-latest
+    timeout-minutes: 15
+    env:
+      TZ: UTC
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7

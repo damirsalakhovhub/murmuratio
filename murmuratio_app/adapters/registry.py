@@ -4,7 +4,8 @@ Schema v1 is owned upstream (task-ledger docs/agents-registry.md): {id, kind, pr
 parent_id, cwd, started_at} plus optional app_id, via, run, v. Here only id and kind are required;
 via, run, v and unknown fields are ignored and optional fields of the
 wrong type count as missing. The last record for an id wins. A malformed line is
-skipped and counted, never failing the source. See docs/specs/agents-registry.md.
+skipped and counted; a file with only malformed records is unsupported.
+See docs/specs/agents-registry.md.
 """
 import json
 from pathlib import Path
@@ -52,6 +53,7 @@ class AgentsRegistryAdapter(Adapter):
         self._cache = None  # (signature, records, malformed)
 
     def collect(self):
+        self.malformed = 0
         try:
             st = self.path.stat()
         except FileNotFoundError:
@@ -63,6 +65,8 @@ class AgentsRegistryAdapter(Adapter):
             records, malformed = self.parse(self.path)
             self._cache = (signature, records, malformed)
         _, records, self.malformed = self._cache
+        if self.malformed and not records:
+            self.unsupported()
         for record in records.values():
             yield self.observation(record, record.get('started_at'))
 

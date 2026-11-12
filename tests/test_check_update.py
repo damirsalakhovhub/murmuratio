@@ -239,6 +239,29 @@ ClaudeDesktopAdapter.collect = broken_collect''',
                 with self.assertRaisesRegex(CheckError, 'codex_sessions.*restart blocked'):
                     check_update(self.url, self.home)
 
+    def test_integration_registry_health_is_checked_even_with_identical_cards(self):
+        baseline = self.api()
+        failed = {'status': 'unavailable', 'reason': 'permission_denied'}
+        for old, new, blocked in (
+                ({}, failed, True),
+                ({'status': 'absent'}, failed, True),
+                (failed, {'status': 'unavailable', 'reason': 'read_failed'}, True),
+                (failed, {'status': 'unsupported', 'reason': 'unrecognized_format'}, True),
+                (failed, failed, False),
+                (failed, {'status': 'available'}, False)):
+            baseline['sources'] = {'integration_registry': old}
+            updated = json.loads(json.dumps(baseline))
+            updated['sources']['integration_registry'] = new
+            with self.subTest(old=old, new=new), \
+                    patch('murmuratio_app.check_update.read_board', side_effect=[baseline, baseline]), \
+                    patch('murmuratio_app.check_update.candidate', return_value=(updated, set(), {}, {})), \
+                    redirect_stdout(io.StringIO()):
+                if blocked:
+                    with self.assertRaisesRegex(CheckError, 'integration_registry.*restart blocked'):
+                        check_update(self.url, self.home)
+                else:
+                    self.assertEqual(check_update(self.url, self.home), 0)
+
     def test_recovered_codex_source_can_identify_the_same_previously_unknown_turn(self):
         baseline = self.api()
         baseline['sources'] = {'codex_sessions': {'status': 'unsupported', 'reason': 'unrecognized_format'}}

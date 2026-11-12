@@ -6,6 +6,7 @@ import tempfile
 import unittest
 
 from tests.routing_fixture import example_policy
+from tests.timezone_helpers import local_timezone
 from murmuratio_app.config import Config
 from murmuratio_app.metrics.quota import (FAST_PERCENT_FACTOR, calculator_timeline, codex_mode, credits_expiry, manual_reset_started,
                                          quota_routing, week_forecast)
@@ -19,6 +20,7 @@ def at(value):
 
 class CalculatorTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(local_timezone('Asia/Almaty'))
         self.now = at('2026-11-10T12:51')
         self.reset = at('2026-11-16T12:51')
         self.resets = (at('2026-12-01T00:51'), at('2026-12-02T03:26'))

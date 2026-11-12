@@ -14,7 +14,8 @@ from murmuratio_app.now import NowSource
 from murmuratio_app.server import sanitize
 
 
-BOARD_SOURCES = ('claude_desktop', 'claude_sessions', 'codex_sessions', 'codex_wrapper', 'agents_registry')
+BOARD_SOURCES = ('claude_desktop', 'claude_sessions', 'codex_sessions', 'codex_wrapper',
+                 'agents_registry', 'integration_registry')
 MAX_RESPONSE = 32 * 1024 * 1024
 
 

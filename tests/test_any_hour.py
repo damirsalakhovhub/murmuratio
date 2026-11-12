@@ -11,12 +11,16 @@ import unittest
 from types import SimpleNamespace
 
 from tests.routing_fixture import example_policy
+from tests.timezone_helpers import local_timezone
 from murmuratio_app.metrics.quota import credits_plan, quota_routing, week_forecast
 from murmuratio_app.server import make_handler
 from tests.any_hour_fixture import FIXTURE, START, WEEK, staged_source
 
 
 class AnyHourTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(local_timezone('Asia/Almaty'))
+
     def test_provider_files_publish_useful_state_at_each_week_boundary(self):
         for moment in FIXTURE['moments']:
             with self.subTest(moment=moment), tempfile.TemporaryDirectory() as directory:

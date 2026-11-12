@@ -58,6 +58,16 @@ class RegistryReaderTests(unittest.TestCase):
         self.path.write_text(good + json.dumps({'id': 'b', 'kind': 'codex'}))
         self.assertEqual(set(self.read()[1]), {'a', 'b'})
 
+    def test_wholly_malformed_registry_is_unsupported_even_from_cache(self):
+        self.path.write_text('{broken}\n')
+        for _ in range(2):
+            self.assertEqual(self.read(), ('unsupported', {}))
+            self.assertEqual(self.adapter.reason, 'unrecognized_format')
+            self.assertEqual(self.adapter.malformed, 1)
+        self.path.write_text('{"id":')
+        self.assertEqual(self.read(), ('available', {}))
+        self.assertEqual(self.adapter.malformed, 0)
+
     def test_parse_record_keeps_text_on_one_line(self):
         record = parse_record({'id': ' t1 ', 'kind': 'Codex', 'name': 'Two\nlines', 'started_at': float('nan')})
         self.assertEqual(record, {'id': 't1', 'kind': 'codex', 'name': 'Two lines'})

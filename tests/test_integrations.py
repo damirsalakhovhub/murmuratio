@@ -526,7 +526,7 @@ class HookAndInstallTests(ProviderStubs, BoardHTTPHarness):
                 self.assertEqual(registry_path(self.home).exists(), keep)
 
     def test_hook_merges_available_fields_without_payload_storage(self):
-        started = self.hook('SessionStart', model='observed-model', title='Hook title', secret='do not store')
+        started = self.hook('SessionStart', model='observed-model', session_title='Hook title', secret='do not store')
         self.assertEqual((started.returncode, started.stdout), (0, ''))
         record = json.loads(registry_path(self.home).read_text())
         self.assertEqual((record['provider_id'], record['model'], record['status']), ('session', 'observed-model', 'running'))
@@ -553,7 +553,7 @@ class HookAndInstallTests(ProviderStubs, BoardHTTPHarness):
         run = registry.write(dict(kind='claude', provider_id='session', role='worker', name='Mode:   Literal',
             parent_kind='codex', parent_id='parent', status='starting', via='launcher',
             model_requested='requested-model', effort_requested='high'))
-        self.hook('SessionStart', title='Wrong title', model='observed-model')
+        self.hook('SessionStart', session_title='Wrong title', model='observed-model')
         self.hook('SessionEnd', final_message='private')
         latest = AgentsRegistryAdapter(registry.path).read().values()[0]
         self.assertEqual((latest['via'], latest['name'], latest['role'], latest['parent_id']),
@@ -673,6 +673,52 @@ class IntegrationBoardTests(BoardHTTPHarness):
                       cwd='/synthetic/project', via='manual', started_at=self.now - 20)
         record.update(fields)
         return AgentRegistry(self.home).write(record)
+
+    def test_registry_effort_cannot_replace_current_transcript_unknown(self):
+        self.register_owned('claude', 'parent', 'Coordinator', effort='high')
+        self.register_owned('codex', 'thread', 'Coordinator', effort='high')
+        # Verify missing transcript settings can still use an observed hook setting.
+        self.assertEqual(self.cards()['claude:parent']['effort'], 'high')
+        for value in ('low', None):
+            with self.subTest(effort=value):
+                self.claude('parent', [self.message('user', content='Coordinate'),
+                    {**self.message('assistant', content='Working', stop_reason='tool_use'), 'perTurnEffort': value}])
+                self.rollout('thread', records=[{'type': 'turn_context', 'payload': {'effort': value}},
+                                                self.event('task_started')])
+                cards = self.cards()
+                for card_id in ('claude:parent', 'codex:thread'):
+                    self.assertEqual(cards[card_id]['effort'], value)
+                    self.assertNotIn('_effort_recorded', cards[card_id])
+
+    def test_owned_registry_reports_corruption_and_recovers_after_append(self):
+        self.register_owned('claude', 'parent', 'Coordinator')
+        path = registry_path(self.home)
+        good = path.read_text()
+        for content, issue, visible in (
+                ('{broken}\n', {'status': 'unsupported', 'reason': 'unrecognized_format', 'malformed': 1}, False),
+                (good + '{broken}\n', {'status': 'available', 'malformed': 1}, True),
+                (good + '{"id":', None, True),
+                (good, None, True),
+                ('{"id":', None, False),
+                ('', None, False)):
+            with self.subTest(content=content):
+                path.write_text(content)
+                state = self.api()
+                self.assertEqual(state.get('sources', {}).get('integration_registry'), issue)
+                self.assertEqual(any(card['id'] == 'claude:parent' for card in state['agents']), visible)
+
+    def test_native_unknown_effort_survives_wrapper_and_registry_merges(self):
+        self.config.modules['codex_wrapper'] = True
+        self.start_server()
+        self.register_owned('codex', 'thread', 'Coordinator', effort='high')
+        self.rollout('thread', records=[{'type': 'turn_context', 'payload': {'effort': None}},
+                                      self.event('task_started')])
+        path = self.home / '.local/share/murmuratio/codex-runs/run.json'
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(dict(status='running', started=self.now - 30, thread='thread',
+                                        effort='high', parent_session='fixture-launcher')))
+        card = self.cards()['codex:run']
+        self.assertIsNone(card['effort'])
 
     def test_registered_orchestrators_need_no_provider_transcript(self):
         self.register_owned('claude', 'parent', 'Coordinate changes')

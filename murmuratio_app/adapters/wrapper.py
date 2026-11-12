@@ -143,6 +143,8 @@ class CodexWrapperAdapter(Adapter):
                 naming = name_fields(titles=[('wrapper', run.get('task_id'))])
         return dict(id='codex:' + path.stem, kind='codex', who=who, model=model or None,
                     effort=recorded_effort(data, run, keys=('model_reasoning_effort', 'reasoning_effort', 'effort')), thread=thread,
+                    _effort_recorded=any(key in source for source in (data, run)
+                                         for key in ('model_reasoning_effort', 'reasoning_effort', 'effort')),
                     cwd=cwd, folder=Path(cwd).name if cwd else '—', project=self.project(cwd),
                     **naming,
                     status=status, last_at=last_at,

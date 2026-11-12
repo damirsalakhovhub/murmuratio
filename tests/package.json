@@ -5,7 +5,7 @@
     "node": ">=22.12.0"
   },
   "scripts": {
-    "test:browser": "node browser_forecast_preference_test.cjs && node credit_header_test.cjs && node session_title_test.cjs && node browser_release_readiness_test.cjs && node browser_states_test.cjs && node browser_modules_test.cjs && node browser_now_test.cjs && node browser_context_test.cjs && node browser_calculator_test.cjs && node browser_real_board_test.cjs && node browser_clean_machine_test.cjs && npm run test:smoke && npm run test:scale",
+    "test:browser": "node --test fixture_startup_test.cjs && node browser_forecast_preference_test.cjs && node credit_header_test.cjs && node session_title_test.cjs && node browser_release_readiness_test.cjs && node browser_states_test.cjs && node browser_modules_test.cjs && node browser_now_test.cjs && node browser_context_test.cjs && node browser_calculator_test.cjs && node browser_real_board_test.cjs && node browser_clean_machine_test.cjs && npm run test:smoke && npm run test:scale",
     "test:smoke": "node browser_release_smoke_test.cjs",
     "test:scale": "node browser_scale_test.cjs"
   },

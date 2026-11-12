@@ -41,8 +41,10 @@ def integration_cards(agents, registry, now, project):
                 and record['status'] == 'running' and record['ended_at'] is None
                 and agent.get('status') == 'done'):
             agent.update(completed=True, ended=agent.get('last_at'))
-        for field in ('model', 'effort'):
-            agent[field] = agent.get(field) or record[field]
+        agent['model'] = agent.get('model') or record['model']
+        # A transcript's explicit unknown belongs to the current turn too.
+        if not agent.get('_effort_recorded') and agent.get('effort') is None:
+            agent['effort'] = record['effort']
         # The launcher's process result is authoritative even when a provider's final event is missing.
         if record['via'] == 'launcher' or record['ended_at'] is not None:
             status = record['status']
@@ -275,6 +277,7 @@ def merge_codex_sources(wrappers, rollouts):
             if same_run:
                 for key in ('model', 'effort'):
                     agent[key] = native.get(key)
+                agent['_effort_recorded'] = native.get('_effort_recorded', False)
             for key in ('thread', 'model', 'cwd', 'folder', 'project', 'context_used',
                         'context_tokens', 'context_window', 'turn_started'):
                 if key == 'model' and not same_run:

@@ -27,7 +27,7 @@ def claude_hook(home):
         if event not in ('SessionStart', 'SessionEnd'):
             return 0
         updates = dict(kind='claude', provider_id=session, via='hook')
-        for field, value in (('cwd', payload.get('cwd')), ('name', payload.get('title')), ('model', payload.get('model'))):
+        for field, value in (('cwd', payload.get('cwd')), ('name', payload.get('session_title')), ('model', payload.get('model'))):
             if isinstance(value, str) and value.strip():
                 updates[field] = single_line(value, field)
         effort = payload.get('effort')

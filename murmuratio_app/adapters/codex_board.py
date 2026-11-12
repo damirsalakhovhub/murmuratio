@@ -365,6 +365,7 @@ class CodexBoardAdapter(Adapter):
                 observation = self.observation(dict(
                     id='codex:' + thread, kind='codex', thread=thread,
                     who='Codex', model=data.get('model') or None, effort=data.get('effort'), cwd=cwd,
+                    _effort_recorded='effort' in data,
                     folder=Path(cwd).name if cwd else '—',
                     project=self.project(cwd) if cwd else 'Unknown',
                     **name_fields(titles=[('desktop', names.get(thread))], text=data.get('task_raw', data.get('task'))), status=status,

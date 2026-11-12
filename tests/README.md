@@ -6,6 +6,10 @@ From the repository root, run the standard-library Python tests:
 python3 -B -m unittest discover -s tests -v
 ```
 
+CI runs both Python versions in UTC. Fixed-clock fixtures scope their own timezone;
+calendar regressions also cover UTC, Asia/Almaty and America/New_York, including DST.
+To repeat the CI timezone locally, prefix the command with `TZ=UTC`.
+
 The browser tests use Node.js 22.12 or newer, `puppeteer-core` and an existing Chrome or Chromium installation. They use isolated fixture data. No browser is downloaded by the test dependency.
 
 ```sh
@@ -16,6 +20,10 @@ npm run test:browser --prefix tests
 The clean-machine test installs, runs and uninstalls in a fresh home with Claude only, Codex only and neither, and checks that nothing is left behind. The real-board test stages synthetic session files and exercises the server and browser without intercepting API requests.
 
 Set `CHROME_PATH` to the browser executable if it is not found automatically. Screenshots are written to the ignored `.murmuratio-data/` directory.
+
+The forecast fixture allows 30 seconds for cold startup. A failure includes the
+child command, elapsed time, stdout and stderr; startup error handling is tested
+before the browser scenarios run.
 
 ## Release smoke
 

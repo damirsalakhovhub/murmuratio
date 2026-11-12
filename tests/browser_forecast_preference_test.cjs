@@ -1,5 +1,6 @@
 // A synthetic quota snapshot exercises chart preferences in a real browser.
 const {puppeteer, chromePath, closeBrowser} = require('./browser_test_helpers.cjs');
+const {fixtureURL} = require('./fixture_startup.cjs');
 const {spawn} = require('node:child_process');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -15,15 +16,7 @@ const service = spawn('python3', ['-B', '-c', 'from murmuratio_app.server import
 (async () => {
   let browser;
   try {
-    const base = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Fixture did not start')), 10000);
-      service.once('error', error => { clearTimeout(timer); reject(error); });
-      service.once('exit', code => { clearTimeout(timer); reject(new Error(`Fixture exited ${code}`)); });
-      service.stdout.on('data', chunk => {
-        const match = String(chunk).match(/http:\/\/127\.0\.0\.1:\d+/);
-        if (match) { clearTimeout(timer); resolve(match[0]); }
-      });
-    });
+    const base = await fixtureURL(service);
     browser = await puppeteer.launch({executablePath: chromePath(), headless: true,
       args: ['--disable-background-networking', '--disable-sync', '--disable-extensions']});
     const artifacts = path.join(root, '.murmuratio-data/forecast-preference');

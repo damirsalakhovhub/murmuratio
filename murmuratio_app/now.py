@@ -480,8 +480,9 @@ class NowSource:
                     issues[adapter.name]['age_seconds'] = adapter.age_seconds
                     if adapter.stale and issues[adapter.name]['status'] != 'stale':
                         issues[adapter.name]['stale'] = True
-            if self.registry_adapter.malformed and self.source_statuses.get('agents_registry') == 'available':
-                issues['agents_registry'] = {'status': 'available', 'malformed': self.registry_adapter.malformed}
+            for adapter in (self.registry_adapter, self.integration_registry_adapter):
+                if adapter.malformed and adapter.status in ('available', 'unsupported'):
+                    issues.setdefault(adapter.name, {'status': adapter.status})['malformed'] = adapter.malformed
             if issues:
                 state['sources'] = issues
             self.refresh_failed = False
